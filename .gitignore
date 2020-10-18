@@ -1,0 +1,10 @@
+# Folders:
+__pycache__/
+.ipynb_checkpoints/
+.vscode/
+outputs/
+WalnutReconstructionCodes/
+
+# Files:
+*.log
+*.h5
