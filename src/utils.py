@@ -12,10 +12,11 @@ class FleX_ray_scanner():
 
     def __init__(self, name='FleX_ray_scanner'):
 
-        self.__name__ = name
+        self.name = name
 
         # (n_rows, n_cols)
         self.detector_size = (1944, 1536)
+        # self.detector_size = self.detector_size[::-1]
         self.detector_binned_size = tuple(map(lambda x: int(x/2), self.detector_size))
 
         # Isotropic pixels
@@ -38,7 +39,7 @@ def from_astra_coords(volume):
     return to_astra_coords(volume)
 
 def flip_trans(image):
-    """Reorients projections correctly"""
+    """Re-orients projections correctly"""
     return np.transpose(np.flipud(image))
 
 
@@ -81,7 +82,10 @@ def rescale_before_saving(func):
 
         if im.min() >= 0:
             if im.max() <= 1:
-                # Resclaing [0,1] floats to uint8
+                # Normalizing to [0,1] then rescaling to uint
+                # im = ((im-im.min()) / (im.max()-im.min())).astype('uint8')
+
+                # # Resclaing [0,1] floats to uint8
                 im = (im *255).astype('uint8')
 
             elif im.max() <= 255:
@@ -89,9 +93,10 @@ def rescale_before_saving(func):
                 im = im.astype('uint8')
             
         elif im.min() >= -1 and im.max() <= 1:
-            # Resclaing [-1,1] floats to uint8
-            im -= im.min()
-            im = (im /im.max()).astype('uint8')
+            # Normalizing to [0,1] then rescaling to uint
+            im = ((im-im.min()) / (im.max()-im.min())).astype('uint8')
+
+            # Rescaling [-1,1] floats to uint8
             # im = ((im +1) *127.5).astype('uint8')
         
         uri = kwargs.pop('uri', args[0])
@@ -107,6 +112,7 @@ def imsave(*args, **kwargs):
 @rescale_before_saving
 def mimsave(*args, **kwargs):
     return imageio.mimsave(*args, **kwargs)
+
 
 def save_vid(filename, image_stack, codec='MJPG', fps=30.0, **kwargs):
     """Saves image stack as a video file (better compression than gifs)
