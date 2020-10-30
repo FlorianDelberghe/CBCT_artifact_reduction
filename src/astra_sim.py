@@ -116,7 +116,7 @@ def create_CB_projection(ct_volume, scanner_params, voxel_size=.1, proj_vecs=Non
 
 
 @time_function
-def FDK_reconstruction(projections, scanner_params, proj_vecs=None, voxel_size=.1, rec_shape=501, **kwargs):
+def  FDK_reconstruction(projections, scanner_params, proj_vecs=None, voxel_size=.1, rec_shape=501, **kwargs):
     """Uses FDK method to reconstruct CT volume from CB projections
         
         Args:
@@ -173,7 +173,7 @@ def FDK_reconstruction(projections, scanner_params, proj_vecs=None, voxel_size=.
 
     # Free ressources
     astra.algorithm.delete(algorithm_id)
-    astra.data3d.delete(projections_id, reconstruction_id)
+    astra.data3d.delete([projections_id, reconstruction_id])
 
     return reconstruction
 
@@ -240,9 +240,8 @@ def AGD_reconstruction(projections, scanner_params, proj_vecs=None, voxel_size=.
 
     # release memory allocated by ASTRA structures
     astra.algorithm.delete(alg_id)
-    astra.data3d.delete(projections_id)
-    astra.data3d.delete(reconstruction_id)
-
+    astra.data3d.delete([projections_id, reconstruction_id])
+    
     return reconstruction
 
 
@@ -290,15 +289,17 @@ def radial_slice_sampling(ct_volume, theta_range):
     
     return rad_slices
 
-
-def create_ct_foam_phantom(shape=501, filepath='small_foam_phantom.h5'):
+@time_function
+def create_ct_foam_phantom(shape=501, seed=0, gen_new=False):
     """"""
-
+    if gen_new:
+        foam_ct_phantom.FoamPhantom.generate('large_foam_phantom.h5', seed, nspheres_per_unit=10000)
+    
     # (nx, ny, nx) for phatom volume geometry
     shape = shape if isinstance(shape, tuple) else (shape,) *3
 
-    phantom = foam_ct_phantom.FoamPhantom(filepath)
-    geom = foam_ct_phantom.VolumeGeometry(*shape, voxsize=3/501)
+    phantom = foam_ct_phantom.FoamPhantom('large_foam_phantom.h5')
+    geom = foam_ct_phantom.VolumeGeometry(*shape, voxsize=3/shape[0])
     phantom.generate_volume('test_phantom.h5', geom)
 
     # [z,y,x] axis order
