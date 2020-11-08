@@ -3,18 +3,23 @@
 This repository contains code for experiments based on the paper "Efficient High Cone-Angle Artifact Reduction in Circular 
 Cone-Beam CT using Symmetry-Aware Deep Learning with Dimension Reduction" by Minnema et al. 
 Cone-Beam CT produces a lot of artefacts when reconstructed with simple backprojection derived techniques such as FDK reconstruction.
-The goal of this project is to find a deep learning based method for efficiently removing high cone angle artefacts in CBCT images.
-A large focus should be put on the transfer learning task to go from the walnut validated scans to real human heads or antropomorphic 
-phantoms.
+
+
+The goal of this project is to use the learned knowledge from the Walnuts dataset and reconstruction task to perform transfer 
+learning toward more antropomorphic looking CT volumes (phantoms and real head scans).
 
 ### Task 1:
 
-Explore transfer learning task from synthetic foam CT phantom to the walnuts dataset (and back).
+Explore transfer learning task from Walnuts dataset to antropomorphic phatoms.
+    * How much new knowledge do we need
+    * What are the differece compared to learning from scratch
+    * Does information about the source domain reamains after tranfer
 
 
 ### Task 2:
 
-Explore transfer learning from walnut trained models to simulated or real human head scans.
+Validate the simulated CBCT projection method and build synthetic CBCT images from real human head CT for the seconc transfer 
+learning task.
 
 
 ## Structure:
