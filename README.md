@@ -11,9 +11,10 @@ learning toward more antropomorphic looking CT volumes (phantoms and real head s
 ### Task 1:
 
 Explore transfer learning task from Walnuts dataset to antropomorphic phatoms.
-    * How much new knowledge do we need
-    * What are the differece compared to learning from scratch
-    * Does information about the source domain reamains after tranfer
+
+    * How much new knowledge do we need  
+    * What are the differences compared to learning from scratch  
+    * Does information about the source domain remains after tranfer  
 
 
 ### Task 2:
