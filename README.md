@@ -8,7 +8,7 @@ Cone-Beam CT produces a lot of artefacts when reconstructed with simple backproj
 
 
 The goal of this project is to use the knowledge learned from the artifact reduction task on the Walnuts dataset and explore 
-transfer learning from this image domain to more antropomorphic looking CBCT scans (phantoms and real head scans).
+transfer learning from this image domain to more antropomorphic looking CBCT scans +(phantoms and real head scans).
 
 ### Task 1:
 
@@ -21,7 +21,7 @@ Explore transfer learning task from Walnuts dataset to antropomorphic phatoms.
 
 ### Task 2:
 
-Validate the simulated CBCT projection method and build synthetic CBCT images from real human head CT for the seconc transfer 
+Validate the simulated CBCT projection method and build synthetic CBCT images from real human head CT for the second transfer 
 learning task.
 
 
