@@ -1,12 +1,14 @@
 # Cone Angle Artifact Reduction 
 
+## Background  
+
 This repository contains code for experiments based on the paper "Efficient High Cone-Angle Artifact Reduction in Circular 
 Cone-Beam CT using Symmetry-Aware Deep Learning with Dimension Reduction" by Minnema et al. 
 Cone-Beam CT produces a lot of artefacts when reconstructed with simple backprojection derived techniques such as FDK reconstruction.
 
 
-The goal of this project is to use the learned knowledge from the Walnuts dataset and reconstruction task to perform transfer 
-learning toward more antropomorphic looking CT volumes (phantoms and real head scans).
+The goal of this project is to use the knowledge learned from the artifact reduction task on the Walnuts dataset and explore 
+transfer learning from this image domain to more antropomorphic looking CBCT scans (phantoms and real head scans).
 
 ### Task 1:
 
