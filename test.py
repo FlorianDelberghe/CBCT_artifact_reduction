@@ -1,32 +1,37 @@
 import argparse
 import glob
 import os
+import random
 import sys
-from functools import reduce
+from datetime import datetime
 
 import astra
 import foam_ct_phantom
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.interpolate import test
 import torch
 from imageio import imread
 from msd_pytorch import MSDRegressionModel
-from torch import mode
+from torch import nn
+from torch.utils.data import DataLoader
 
-from src.unet_regr_model import UNetRegressionModel
-from src import astra_sim
 import src.utils as utils
-from src.utils import (FleX_ray_scanner, imsave, load_projections, mimsave,
-                       to_astra_coords)
+from src import astra_sim
+from src.image_dataset import MultiOrbitDataset, data_augmentation
+from src.test_model import add_noise, compute_metric, noise_robustness, test
+from src.train_model import TVRegularization, train
+from src.transfer_model import transfer
+from src.unet_regr_model import UNetRegressionModel
+from src.utils import (ValSampler, _nat_sort, evaluate, imsave,
+                       load_projections, mimsave)
 
 
 def test_astra_sim():
 
-    scanner_params = FleX_ray_scanner()
+    scanner_params = astra_sim.FleX_ray_scanner()
 
     # ===== Import projections data and reconstruct volume w/ FDK ===== #
-    projections, dark_field, flat_field, vecs = load_projections(DATA_PATH+f'Walnut{WALNUT_ID}', orbit_id=ORBIT_ID)
+    projections, dark_field, flat_field, vecs = load_projections(DATA_PATH+f'Walnuts/Walnut{WALNUT_ID}', orbit_id=ORBIT_ID)
     projections = (projections - dark_field) / (flat_field - dark_field)
     projections = -np.log(projections)
     projections = np.ascontiguousarray(projections)
@@ -44,8 +49,8 @@ def test_astra_sim():
     utils.save_vid('outputs/reconst_fdk_radial2axial.avi', axial_slices[...,None])
 
     # ===== Import ground truth volume data and simulate projection and reconstruction ===== #
-    fdk_files = sorted(glob.glob(DATA_PATH+f'Walnut{WALNUT_ID}/Reconstructions/fdk_pos{ORBIT_ID}_*.tiff'))
-    agd_files = sorted(glob.glob(DATA_PATH+f'Walnut{WALNUT_ID}/Reconstructions/full_AGD_50*.tiff'))
+    fdk_files = sorted(glob.glob(DATA_PATH+f'Walnuts/Walnut{WALNUT_ID}/Reconstructions/fdk_pos{ORBIT_ID}_*.tiff'))
+    agd_files = sorted(glob.glob(DATA_PATH+f'Walnuts/Walnut{WALNUT_ID}/Reconstructions/full_AGD_50*.tiff'))
     fdk_volume = np.stack([imread(file) for file in fdk_files], axis=0)
     agd_volume = np.stack([imread(file) for file in agd_files], axis=0)
 
@@ -79,77 +84,137 @@ def test_astra_sim():
                    astra_sim.radial_slice_sampling(reconstruction, np.linspace(0, np.pi, 360, endpoint=False))[...,None])
 
 
-def test_msd_net():
+def train_model(seed=0):
     
+    model_params = {'c_in': 1, 'c_out': 1, 'depth': 30, 'width': 1,
+                        'dilations': [1,2,4,8,16], 'loss': 'L2'}
+    model = MSDRegressionModel(**model_params)
+    # model.net.load_state_dict(torch.load('model_weights/radial_msd_depth80_it5_epoch59_copy.pytorch')['state_dict'])
+    # regularization = TVRegularization(scaling=1e-3)
+    regularization = None
+
+    # agd_ims, fdk_ims = utils.load_phantom_ds()
+    agd_ims, fdk_ims = utils.load_walnut_ds()
+    random.seed(seed)
+    test_id = random.randrange(len(agd_ims))
+    print(f"Using sample {test_id} as validation")
+    input_val, target_val = [fdk_ims.pop(test_id)], [agd_ims.pop(test_id)]
+    # train_id = random.randrange(len(agd_ims))
+    # input_tr, target_tr = [fdk_ims.pop(train_id)], [agd_ims.pop(train_id)]
+    input_tr, target_tr = fdk_ims, agd_ims
+
+    batch_size = 32
+    train_dl = DataLoader(MultiOrbitDataset(input_tr, target_tr, device='cuda'), batch_size=batch_size, shuffle=True)
+    val_ds = MultiOrbitDataset(input_val, target_val, device='cuda')
+    val_dl = DataLoader(val_ds, batch_size=batch_size, sampler=ValSampler(len(val_ds)))
+    
+    kwargs = {}
+    # kwargs = {'save_folder': 
+    #           f"model_weights/MSD_d80_walnuts_finetuned_{datetime.now().strftime('%m%d%H%M%S')}"}
+    train(model, (train_dl, val_dl), nn.MSELoss(), 20, regularization, lr=2e-3, **kwargs)
+
+
+def test_model():
+
+    model_params = {'c_in': 1, 'c_out': 1, 'depth': 80, 'width': 1,
+                        'dilations': [1,2,4,8,16], 'loss': 'L2'}
+    model_80 = MSDRegressionModel(**model_params)
+    state_dicts = sorted(glob.glob('model_weights/MSD_d80_walnuts_finetuned_1114125135/best*.h5'), key=_nat_sort)
+    model_80.msd.load_state_dict(torch.load(state_dicts[-1]))
+
+    model_params = {'c_in': 1, 'c_out': 1, 'depth': 30, 'width': 1,
+                        'dilations': [1,2,4,8,16], 'loss': 'L2'}
+    model_30 = MSDRegressionModel(**model_params)
+    state_dicts = sorted(glob.glob('model_weights/MSD_d30_walnuts1113135028/best*.h5'), key=_nat_sort)
+    model_30.msd.load_state_dict(torch.load(state_dicts[-1]))
+
+    agd_ims, fdk_ims = utils.load_walnut_ds()
+    # agd_ims, fdk_ims = utils.load_phantom_ds()
+    random.seed(0)
+    test_id = random.randrange(len(agd_ims))
+    input_te, target_te = [fdk_ims.pop(test_id)], [agd_ims.pop(test_id)]
+    
+    te_ds = MultiOrbitDataset(input_te, target_te, data_augmentation=False)
+    te_dl = DataLoader(te_ds, batch_size=8, sampler=ValSampler(len(te_ds)))
+
+    model_80.set_normalization(te_dl)
+    model_30.set_normalization(te_dl)
+
+    mean, std = test(model_80, te_ds)
+    print(f"Model d80 \n\tMSE: {mean[0]:.4e} +-{std[0]:.4e}, \n\tSSIM: {mean[1]:.4f} +-{std[1]:.4e}, \n\tDSC: {mean[2]:.4f} +-{std[2]:.4e}")
+
+    mean, std = test(model_30, te_ds)
+    print(f"Model d30 \n\tMSE: {mean[0]:.4e} +-{std[0]:.4e}, \n\tSSIM: {mean[1]:.4f} +-{std[1]:.4e}, \n\tDSC: {mean[2]:.4f} +-{std[2]:.4e}")
+
+    
+    sys.exit()
+
+    model.msd.load_state_dict(torch.load(state_dicts[-1]))
+    with evaluate(model):
+        for i, (input_, target) in enumerate(te_dl):
+            pred = model(input_)
+            print(f"MSE: {mse(pred, target):.4e}, SSIM: {ssim(pred, target):.4f}, DSC: {dsc(pred, target):.4f}")
+
+            imsave(f'outputs/test_pred_{i+1}.tif', np.clip(np.concatenate([input_[0,0].cpu().numpy(), pred[0,0].cpu().numpy(), target[0,0].cpu().numpy()], axis=-1), 0 ,None))
+
+    plt.figure(figsize=(10,10))
+    plt.plot(epochs, losses)
+    plt.savefig('outputs/training.png')
+
+
+def transfer_model():
+
+    model_params = {'c_in': 1, 'c_out': 1, 'depth': 30, 'width': 1,
+                        'dilations': [1,2,4,8,16], 'loss': 'L2'}
+    model = MSDRegressionModel(**model_params)
+    # state_dict = torch.load('model_weights/radial_msd_depth80_it5_epoch59_copy.pytorch')['state_dict']
+    # model.net.load_state_dict(state_dict)
+
+    agd_ims, fdk_ims = utils.load_walnut_ds()
+    random.seed(0)
+    val_id = random.randrange(len(agd_ims))
+    input_val, target_val = [fdk_ims.pop(val_id)], [agd_ims.pop(val_id)]
+
+    # train_id = random.randrange(len(agd_ims))
+    # input_tr, target_tr = [fdk_ims.pop(train_id)], [agd_ims.pop(train_id)]
+    input_tr, target_tr = fdk_ims, agd_ims
+
+    val_ds = MultiOrbitDataset(input_val, target_val, device='cuda')
+    train_dl = DataLoader(MultiOrbitDataset(input_tr, target_tr, device='cuda'), batch_size=8, shuffle=True)
+    val_dl = DataLoader(val_ds, batch_size=8, sampler=ValSampler(len(val_ds)))
+
+    model.set_normalization(train_dl)
+
+    transfer(model, (train_dl, val_dl))
+
+
+def main():
     # Sets available GPU if not already set in env vars
     if 'CUDA_VISIBLE_DEVICES' not in os.environ.keys():
         torch.cuda.set_device(globals().get('GPU_ID', -1))
 
-    print(f"Running on GPU:{torch.cuda.current_device()}, {torch.cuda.get_device_name(torch.cuda.current_device())}")
+    print(f"Running on GPU: {torch.cuda.current_device()}, {torch.cuda.get_device_name(torch.cuda.current_device())}", 
+          flush=True)
 
-    # Full volume
-    fdk_files = sorted(glob.glob(DATA_PATH+f'Walnut{WALNUT_ID}/Reconstructions/fdk_pos{ORBIT_ID}_*.tiff'))
-    agd_files = sorted(glob.glob(DATA_PATH+f'Walnut{WALNUT_ID}/Reconstructions/full_AGD_50*.tiff'))
-
-    # Radial slices
-    test_fdk = sorted(glob.glob(f'/data/fdelberghe/WalnutsRadial/Walnut7/fdk_pos{ORBIT_ID}*.tiff'))
-    test_agd = sorted(glob.glob('/data/fdelberghe/WalnutsRadial/Walnut7/iterative*.tiff'))
-
-    images_fdk = np.stack([imread(file) for file in fdk_files], axis=0)
-    images_agd = np.stack([imread(file) for file in agd_files], axis=0)
-
-    model_params = {'c_in': 1, 'c_out': 1, 'depth': 80, 'width': 1,
-                    'dilations': [1,2,4,8,16], 'loss': 'L2'}
-
-    model = MSDRegressionModel(**model_params)
-    model.load('model_weights/radial_msd_depth80_it5_epoch59_copy.pytorch')
-
-    # model = UNetRegressionModel(**model_params, reflect=True, conv3d=False)
-    # model.load('model_weights/radial_unet_depth80_it5_epoch9.pytorch')
-
-    mean_in, std_in = images_fdk.mean(), images_fdk.std()
-    mean_out, std_out = images_agd.mean(), images_agd.std()
-
-    model.scale_in.weight.data.fill_(1 / std_in)
-    model.scale_in.bias.data.fill_(-mean_in / std_in)
-    model.scale_out.weight.data.fill_(std_out)
-    model.scale_out.bias.data.fill_(mean_out)
-
-    test_tensor = torch.from_numpy(images_fdk[:,250]).view((1,1, *images_fdk[:,250].shape))
-    print(test_tensor.size(), test_tensor.min().item(), test_tensor.max().item(), test_tensor.std().item())
-
-    with torch.no_grad():
-        out_tensor = model.net(test_tensor.cuda())
-
-    print(out_tensor.size(), out_tensor.min().item(), out_tensor.max().item(), out_tensor.std().item())
-    print(np.sqrt(((out_tensor[0,0].detach().cpu().numpy() - images_agd[:,250]) **2).mean()))
-
-    test_tensor = (test_tensor - test_tensor.min()) / (test_tensor.max() - test_tensor.min())
-    imsave('outputs/test_in.png', test_tensor[0,0].numpy())
-    out_tensor = (out_tensor - out_tensor.min()) / (out_tensor.max() - out_tensor.min())
-    imsave('outputs/test_out.png', out_tensor[0,0].detach().cpu().numpy())
-
-
-def main():
-
-    test_astra_sim()
-    test_msd_net()
-
+    # test_astra_sim()
+    # train_model()
+    # test_model()
+    transfer_model()    
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-g', '--gpu', type=int, nargs='?', default=0,
                         help='GPU to run astra sims on')
-    parser.add_argument('--nut_id', type=int, nargs='?', default=7,
+    parser.add_argument('--nut_id', type=int, nargs='?', default=7, 
                         help='Which walnut to import')
     parser.add_argument('--orbit_id', type=int, nargs='?', default=2,
                         choices=(1,2,3),
                         help='Orbit to load projection from')
     args = parser.parse_args()
 
-    DATA_PATH = '/data/fdelberghe/Walnuts/'
     GPU_ID = args.gpu
     WALNUT_ID = args.nut_id
     ORBIT_ID = args.orbit_id
+    DATA_PATH = '/data/fdelberghe/'
 
     main()

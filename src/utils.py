@@ -1,42 +1,16 @@
 import glob
 import os
+import random
+import re
 import time
+from contextlib import contextmanager
 
 import imageio
+import matplotlib.pyplot as plt
 import numpy as np
-from cv2 import VideoWriter, VideoWriter_fourcc, cvtColor, COLOR_GRAY2RGB
+import torch
+from cv2 import COLOR_GRAY2RGB, VideoWriter, VideoWriter_fourcc, cvtColor
 
-
-class FleX_ray_scanner():
-    """Class for storage of the CBCT scanners intrinsic parameters, sizes in mm"""
-
-    def __init__(self, name='FleX_ray_scanner'):
-
-        self.name = name
-
-        # (n_rows, n_cols)
-        self.detector_size = (1944, 1536)
-        # self.detector_size = self.detector_size[::-1]
-        self.detector_binned_size = tuple(map(lambda x: int(x/2), self.detector_size))
-
-        # Isotropic pixels
-        self.pixel_size = 74.8 * 1e-3
-        self.pixel_binned_size = 2 * self.pixel_size
-
-        self.source_origin_dist = 66
-        self.source_detector_dist = 199
-        self.origin_detector_dist = self.source_detector_dist - self.source_origin_dist
-
-        self.FoV = tuple(map(lambda x: x * self.pixel_size, self.detector_size))
-
-
-def to_astra_coords(volume):
-    """[z, x, y] -> [x, z, y]"""
-    return np.transpose(volume, (1,0,2))
-
-def from_astra_coords(volume):
-    """[x, z, y] -> [z, x, y] same axis flipping to and from"""
-    return to_astra_coords(volume)
 
 def flip_trans(image):
     """Re-orients projections correctly"""
@@ -74,34 +48,39 @@ def rescale_before_saving(func):
     images to uint8 range and changes type to uint8 to prevent warning messages"""
 
     def rescale(*args, **kwargs):
-
-        if 'im' in kwargs.keys() or 'ims' in kwargs.keys():
-            im = kwargs.pop('im', kwargs['ims'])
-        else:
-            im = args[1]
-
-        if im.min() >= 0:
-            if im.max() <= 1:
-                # Normalizing to [0,1] then rescaling to uint
-                # im = ((im-im.min()) / (im.max()-im.min())).astype('uint8')
-
-                # # Resclaing [0,1] floats to uint8
-                im = (im *255).astype('uint8')
-
-            elif im.max() <= 255:
-                # Matches type to avoid warnings
-                im = im.astype('uint8')
-            
-        elif im.min() >= -1 and im.max() <= 1:
-            # Normalizing to [0,1] then rescaling to uint
-            im = ((im-im.min()) / (im.max()-im.min())).astype('uint8')
-
-            # Rescaling [-1,1] floats to uint8
-            # im = ((im +1) *127.5).astype('uint8')
         
+        def normalize(image):
+            if image.max()-image.min() == 0:
+                return np.zeros_like(image)
+
+            return (image-image.min()) / (image.max()-image.min())
+
+
+        im = kwargs.pop('im', kwargs.pop('ims', args[1]))
         uri = kwargs.pop('uri', args[0])
 
+        if uri.split('.')[-1] in ['tif', 'tiff']:
+            return func(uri, im, **kwargs)
+
+        # Normalizing to [0,1] then rescaling to uint
+        im = (normalize(im) *255).astype('uint8')
+
         return func(uri, im, **kwargs)
+
+        # if im.min() >= 0:
+        #     if im.max() <= 1:                
+        #         # Resclaing [0,1] floats to uint8
+        #         im = (im *255).astype('uint8')
+
+        #     elif im.max() <= 255:
+        #         # Matches type to avoid warnings
+        #         im = im.astype('uint8')
+            
+        # elif im.min() >= -1 and im.max() <= 1:
+        #     # Rescaling [-1,1] floats to uint8
+        #     im = ((im +1) *127.5).astype('uint8')
+        
+        # return func(uri, im, **kwargs)
 
     return rescale
 
@@ -114,7 +93,7 @@ def mimsave(*args, **kwargs):
     return imageio.mimsave(*args, **kwargs)
 
 
-def save_vid(filename, image_stack, codec='MJPG', fps=30.0, **kwargs):
+def save_vid(filename, image_stack, codec='MJPG', fps=30, **kwargs):
     """Saves image stack as a video file (better compression than gifs)
         Args:
         -----
@@ -122,13 +101,14 @@ def save_vid(filename, image_stack, codec='MJPG', fps=30.0, **kwargs):
             image_stack (np.ndarray): image stack in [z/t,x,y,c] format
             codec (str): opencv fourcc compatible codec, 4 char long str
     """
-
+    
     fourcc = VideoWriter_fourcc(*codec)
     out = VideoWriter(filename, fourcc, fps, image_stack.shape[1:3][::-1], **kwargs)
 
     # Rescale for video compatible format
     if not image_stack.dtype is np.uint8:
-        image_stack = np.clip(image_stack *255, 0,255).astype('uint8')
+        image_stack = ((image_stack-image_stack.min()) / (image_stack.max()-image_stack.min()) *255).astype('uint8')
+        # image_stack = np.clip(image_stack *255, 0,255).astype('uint8')
 
     for i in range(image_stack.shape[0]):
         if image_stack.shape[-1] == 1:
@@ -143,17 +123,151 @@ def save_vid(filename, image_stack, codec='MJPG', fps=30.0, **kwargs):
     out.release()
 
 
-def time_function(func):
+def timeit(func):
     """Decorator to monitor computing time"""
 
     f_name = ' '.join(func.__name__.split('_'))
 
-    def time_wrapper(*args, **kwargs):
+    def timeit_wrapper(*args, **kwargs):
         start_time = time.time()
         print(f'Starting {f_name}...', end=' ', flush=True)
         return_values = func(*args, **kwargs)
-        print(f"Done! (took {time.time() -start_time:.2f}s)")
+        print(f"Done! (took {time.time()-start_time:.2f}s)", flush=True)
         
         return return_values
 
-    return time_wrapper
+    return timeit_wrapper
+
+
+@contextmanager
+def evaluate(model):
+    """Context manager to evaluate models disables grad computation and sets model to eval"""
+
+    try:
+        torch.set_grad_enabled(False)
+        model.eval()
+        yield None
+
+    finally:
+        torch.set_grad_enabled(True)
+        model.train()
+    
+
+_nat_sort = lambda s: [int(c) if c.isdigit() else c for c in re.split("([0-9]+)", s)]
+
+
+def load_walnut_ds():
+
+    DATA_PATH = '/data/fdelberghe/FastWalnuts2/'
+    walnut_folders = [folder for folder in sorted(os.listdir(DATA_PATH), key=_nat_sort) 
+                      if os.path.isdir(os.path.join(DATA_PATH, folder))]
+
+    walnuts_agd_paths = [sorted(glob.glob(os.path.join(DATA_PATH + f"{folder}/agd_*.tif")), key=_nat_sort) 
+                         for folder in walnut_folders]
+    walnuts_fdk_paths = [
+        [sorted(glob.glob(os.path.join(DATA_PATH + f"{folder}/fdk_orbit{orbit_id:02d}*.tif")),
+                key=_nat_sort) for orbit_id in [1, 2, 3]] for folder in walnut_folders]
+
+    return walnuts_agd_paths, walnuts_fdk_paths
+
+
+def load_foam_phantom_ds():
+
+    DATA_PATH = '/data/fdelberghe/'
+    phantom_folders = [folder for folder in sorted(os.listdir(os.path.join(DATA_PATH, 'FoamPhantoms/')), key=_nat_sort) 
+                      if os.path.isdir(os.path.join(DATA_PATH, f'FoamPhantoms/{folder}'))]
+
+    phantom_agd_paths = [
+        sorted(glob.glob(os.path.join(DATA_PATH + f"FoamPhantoms/{folder}/phantom_true_*.tif")), key=_nat_sort)
+        for folder in phantom_folders]
+
+    phantom_fdk_paths = [
+        [sorted(glob.glob(os.path.join(DATA_PATH + f"FoamPhantoms/{folder}/phantom_fdk_*_o{orbit_id}*.tif")), key=_nat_sort)
+         for orbit_id in [1, 2, 3]] for folder in phantom_folders]
+
+    return phantom_agd_paths, phantom_fdk_paths
+
+
+def load_phantom_ds():
+
+    DATA_PATH = '/data/fdelberghe/'
+    phantom_folders = [folder for folder in sorted(os.listdir(os.path.join(DATA_PATH, 'Phantoms/')), key=_nat_sort) 
+                      if os.path.isdir(os.path.join(DATA_PATH, f'Phantoms/{folder}'))]
+
+    phantom_target_paths = [
+        sorted(glob.glob(os.path.join(DATA_PATH + f"Phantoms/{folder}/target*.tif")), key=_nat_sort)
+        for folder in phantom_folders]
+
+    phantom_input_paths = [
+        sorted(glob.glob(os.path.join(DATA_PATH + f"Phantoms/{folder}/input*.tif")), key=_nat_sort)
+         for folder in phantom_folders]
+
+    return phantom_target_paths, phantom_input_paths
+
+
+class ValSampler(torch.utils.data.Sampler):
+    """Samplers to avoid going through the entire validation dataset each time"""
+        
+    def __init__(self, dataset_len, n_samples=100):
+        self.dataset_len = dataset_len
+        self.n_samples = n_samples
+
+    def __len__(self):
+        return self.n_samples
+
+    def __iter__(self):
+        return iter(random.sample(range(self.dataset_len-1), self.n_samples))
+
+
+class BatchSampler(torch.utils.data.Sampler):
+
+    def __init__(self, dataset, sub_sampling):
+        raise NotImplementedError
+
+
+class LossTracker():
+
+    def __init__(self, **kwargs):
+        """Function gets losses to track as {'loss_name': loss_init_value,}"""
+        self.progress = [0]
+        self.losses = dict(
+            ((k, v) if isinstance(v, list) else (k, [v]) for k, v in kwargs.items())
+            )
+
+    def update(self, *losses, **named_losses):
+
+        # Same order as __init__
+        if len(losses) > 0:
+            self.progress.append(self.progress[-1]+1)
+            for key, loss in zip(self.losses, losses):
+                self.losses[key].append(loss)
+            # One method or the other
+            return
+
+        # Random order
+        if len(named_losses) > 0:
+            self.progress.append(self.progress[-1]+1)
+            for name, loss in named_losses.item():
+                self.losses[name].append(loss)
+            return
+        
+        raise ValueError("No valid value to update losses")
+
+    def plot(self, **kwargs):
+        plt.figure(figsize=(10,10))
+
+        for key, loss in self.losses.items():
+            if len(self.progress) == len(loss):
+                plt.plot(self.progress, loss, label=key)
+            else:
+                plt.plot(list(range(len(loss))), loss, label=key)
+
+        plt.xlabel(kwargs.get('xlabel', 'Epoch'))
+        plt.ylabel(kwargs.get('ylabel', 'Loss'))
+        plt.title(kwargs.get('title', ''))
+        plt.xticks(kwargs.get('xticks', 
+                              np.linspace(0, len(self.progress)-1, min(16, len(self.progress))).astype('int16')))
+        plt.legend()
+        plt.savefig(kwargs.get('filename', 'outputs/training_losses.png'))
+
+

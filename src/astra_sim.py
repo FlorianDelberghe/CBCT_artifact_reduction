@@ -1,17 +1,39 @@
-import glob
-import os
-import sys
-import time
-
 import astra
-import imageio
-import matplotlib.pyplot as plt
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 import foam_ct_phantom
 
 from . import nesterov_gradient
-from .utils import to_astra_coords, from_astra_coords, time_function
+from .utils import timeit
+
+
+class FleX_ray_scanner():
+    """Class for storage of the CBCT scanners intrinsic parameters, sizes in mm"""
+
+    def __init__(self, name='FleX_ray_scanner',
+                 detector_size=(1944, 1536),
+                 pixel_size=74.8e-3,
+                 bin_factor=2,
+                 source_origin_dist=66,
+                 source_detector_dist=199):
+
+
+        self.name = name
+        # (n_rows, n_cols)
+        self.detector_size = detector_size
+        # Isotropic pixels
+        self.pixel_size = pixel_size
+
+        self.bin_factor = int(bin_factor)
+        self.detector_binned_size = tuple(map(lambda x: int(x/bin_factor), self.detector_size))
+        self.pixel_binned_size = bin_factor * self.pixel_size
+
+        self.source_origin_dist = source_origin_dist
+        self.source_detector_dist = source_detector_dist
+        self.origin_detector_dist = self.source_detector_dist - self.source_origin_dist
+
+
+        self.FoV = tuple(map(lambda x: x * self.pixel_size, self.detector_size))
 
 
 def rotate_astra_vec_geom(vecs, theta):
@@ -32,8 +54,8 @@ def create_scan_geometry(scan_params, n_projs=360, elevation=0):
             scan_params (class): scanner class to get relevant metadata from
             n_projs (int): number of projections, regularly sampled over [0, 2*np.pi[
             elevations (float): height of the source during the scan, (in mm)
-
         Returns:
+
         --------
             vecs (np.ndarray): projection vectors characterizing the scan goemetry
     """
@@ -59,22 +81,15 @@ def create_scan_geometry(scan_params, n_projs=360, elevation=0):
     # row pixel spacing vector
     v = np.array([(0, 0, scan_params.pixel_binned_size) for _ in scan_angles])
 
-    # theta = np.pi/2
-    # rot_mat = np.array([[1, 0, 0],
-    #                     [0, np.cos(theta), -np.sin(theta)],
-    #                     [0, np.sin(theta), np.cos(theta)]])
-
-    # return np.concatenate([v @ rot_mat.T for v in [src, d, u, v]], axis=1)
-
     return np.concatenate((src, d, u, v), axis=1).astype('float32')
 
 
-@time_function
-def create_CB_projection(ct_volume, scanner_params, voxel_size=.1, proj_vecs=None, n_projs=180, **kwargs):
+@timeit
+def create_CB_projection(ct_volume, scanner_params, proj_vecs, voxel_size=.1, **kwargs):
     """
         Args:
         -----
-            ct_volume (np.ndarray): [z, x, y] axis order at import
+            ct_volume (np.ndarray): [z,x,y] axis order at import
             scanner_params (class): scanner class to get relevant metadata from
             voxel_size (float): voxel size in mm
             n_projs (int): 
@@ -90,21 +105,15 @@ def create_CB_projection(ct_volume, scanner_params, voxel_size=.1, proj_vecs=Non
     astra.astra.set_gpu_index(globals().get('GPU_ID', kwargs.get('gpu_id', -1)))
 
     # [y,x,z] axis order
-    vol_geom = astra.creators.create_vol_geom(*np.transpose(ct_volume, (2,1,0)).shape,
-        *[sign*size/2*voxel_size for size in np.transpose(ct_volume, (2,1,0)).shape for sign in [-1,1]]
+    vol_geom = astra.creators.create_vol_geom(*np.transpose(ct_volume, (1,2,0)).shape,
+        *[sign*size/2*voxel_size for size in np.transpose(ct_volume, (1,2,0)).shape for sign in [-1,1]]
     )
+
     # [z,y,x] axis order
-    proj_id = astra.data3d.create('-vol', vol_geom, data=np.transpose(ct_volume, (0,2,1)))
-    
-    if proj_vecs is not None:
-        proj_geom = astra.create_proj_geom('cone_vec', *scanner_params.detector_binned_size, proj_vecs)
-                
-    else:
-        angles = np.linspace(0, 2 * np.pi, num=n_projs, endpoint=False)
-        proj_geom = astra.create_proj_geom(
-            'cone', *(scanner_params.pixel_binned_size,) *2, 
-            *scanner_params.detector_binned_size, angles,
-            scanner_params.source_origin_dist, scanner_params.origin_detector_dist)
+    proj_id = astra.data3d.create('-vol', vol_geom, data=ct_volume)    
+    proj_geom = astra.create_proj_geom('cone_vec', 
+                                       *scanner_params.detector_binned_size, 
+                                       proj_vecs)
 
     projections_id, projections = astra.creators.create_sino3d_gpu(
         proj_id, proj_geom, vol_geom)
@@ -115,8 +124,8 @@ def create_CB_projection(ct_volume, scanner_params, voxel_size=.1, proj_vecs=Non
     return np.transpose(projections, (1,0,2))
 
 
-@time_function
-def  FDK_reconstruction(projections, scanner_params, proj_vecs=None, voxel_size=.1, rec_shape=501, **kwargs):
+@timeit
+def FDK_reconstruction(projections, scanner_params, proj_vecs=None, voxel_size=.1, rec_shape=501, **kwargs):
     """Uses FDK method to reconstruct CT volume from CB projections
         
         Args:
@@ -125,38 +134,25 @@ def  FDK_reconstruction(projections, scanner_params, proj_vecs=None, voxel_size=
             scanner_params (class): class containing scanner data
             proj_vecs (np.ndarray): vects describing the scanning used for reconstruction
             voxel_size (float): size of the reconstructed volumes
-            rec_shape (int/tuple): shape of the reconstructed volume tuple with 3 dims [z,x,y] or int if isotropic
+            rec_shape (int/tuple): shape of the reconstructed volume tuple with 3 dims [z,y,x] or int if isotropic
 
             --optional--
             gpu_id (int): GPU for astra to use if not set globaly, defaults to -1
             
         Returns:
         --------
-            recontstruction (np.ndarray): [z,x,y] recontructed CT volume
+            reconstruction (np.ndarray): [z,y,x] recontructed CT volume
     """
 
     astra.astra.set_gpu_index(globals().get('GPU_ID', kwargs.get('gpu_id', -1)))
 
     # from [proj_slc,rows,cols] to [rows,proj_slc,cols]
-    projections = np.transpose(projections, (1,0,2)) 
-
-    if proj_vecs is not None:
-        # Gets scanning geometry from vec param
-        proj_geom = astra.create_proj_geom('cone_vec', *scanner_params.detector_binned_size, proj_vecs)
-
-    else:
-        # Assumes scanning geometry from scanner params
-        angles = np.linspace(0, 2 *np.pi, num=projections.shape[1], endpoint=False)
-        proj_geom = astra.create_proj_geom(
-            'cone', *(scanner_params.pixel_binned_size,) *2, 
-            *scanner_params.detector_binned_size, angles,
-            scanner_params.source_origin_dist, scanner_params.origin_detector_dist)
-    
+    projections = np.transpose(projections, (1,0,2))
+    proj_geom = astra.create_proj_geom('cone_vec', *scanner_params.detector_binned_size, proj_vecs)    
     projections_id = astra.data3d.create('-sino', proj_geom, projections)
 
-    # [z,x,y] to [y,x,z] axis transposition
-    reconstructed_shape = tuple([rec_shape[i] for i in [2,1,0]]) if isinstance(rec_shape, tuple) else (rec_shape,) *3
-    voxel_size = 2 *scanner_params.pixel_binned_size * scanner_params.source_origin_dist / scanner_params.source_detector_dist
+    # [z,y,x] to [y,x,z] axis transposition
+    reconstructed_shape = tuple([rec_shape[i] for i in [2,0,1]]) if isinstance(rec_shape, tuple) else (rec_shape,) *3
     vol_geom = astra.creators.create_vol_geom(*reconstructed_shape,
         *[sign*size/2*voxel_size for size in reconstructed_shape for sign in [-1, 1]]
     )
@@ -178,7 +174,7 @@ def  FDK_reconstruction(projections, scanner_params, proj_vecs=None, voxel_size=
     return reconstruction
 
 
-@time_function
+@timeit
 def AGD_reconstruction(projections, scanner_params, proj_vecs=None, voxel_size=.1, 
                        rec_shape=501, n_iter=50, **kwargs):
     """Uses FDK method to reconstruct CT volume from CB projections
@@ -189,7 +185,7 @@ def AGD_reconstruction(projections, scanner_params, proj_vecs=None, voxel_size=.
             scanner_params (class): class containing scanner data
             proj_vecs (np.ndarray): vects describing the scanning used for reconstruction
             voxel_size (float): size of the reconstructed volumes
-            rec_shape (int/tuple): shape of the reconstructed volume tuple with 3 dims [z,x,y] or int if isotropic
+            rec_shape (int/tuple): shape of the reconstructed volume tuple with 3 dims [z,y,x] or int if isotropic
             n_iter (int): number of gradient descent steps
 
             --optional--
@@ -197,12 +193,13 @@ def AGD_reconstruction(projections, scanner_params, proj_vecs=None, voxel_size=.
             
         Returns:
         --------
-            recontstruction (np.ndarray): [z,x,y] recontructed CT volume
+            recontstruction (np.ndarray): [z,y,x] recontructed CT volume
     """
 
     astra.astra.set_gpu_index(globals().get('GPU_ID', kwargs.get('gpu_id', -1)))
 
-    projections = to_astra_coords(projections)    
+    # from [proj_slc,rows,cols] to [rows,proj_slc,cols]
+    projections = np.transpose(projections, (1,0,2))
 
     if proj_vecs is not None:
         # Gets scanning geometry from vec param
@@ -218,7 +215,8 @@ def AGD_reconstruction(projections, scanner_params, proj_vecs=None, voxel_size=.
     
     projections_id = astra.data3d.create('-sino', proj_geom, projections)
 
-    reconstructed_shape = rec_shape if isinstance(rec_shape, tuple) else (rec_shape,) *3
+    # [z,y,x] to [y,x,z] axis transposition
+    reconstructed_shape = tuple([rec_shape[i] for i in [2,0,1]]) if isinstance(rec_shape, tuple) else (rec_shape,) *3
     voxel_size = 2 *scanner_params.pixel_binned_size * scanner_params.source_origin_dist / scanner_params.source_detector_dist
     vol_geom = astra.creators.create_vol_geom(*reconstructed_shape,
         *[sign*size/2*voxel_size for size in reconstructed_shape for sign in [-1, 1]]
@@ -245,17 +243,12 @@ def AGD_reconstruction(projections, scanner_params, proj_vecs=None, voxel_size=.
     return reconstruction
 
 
-def generate_radial_slices(projections, scanner_params, proj_vecs, rec_shape=501, **kwargs):
-    """"""
-    raise NotImplementedError("")
-
-
-@time_function
+@timeit
 def radial_slice_sampling(ct_volume, theta_range):
     """Samples horizontal slices in a CT volume at angles in theta_range
         Args:
         -----
-            ct_volume (np.ndarray): image volume to be sliced, axis as [z,x,y] isotropic volumes (for now)
+            ct_volume (np.ndarray): image volume to be sliced, axis as [z,x,y] (XY plane must be isotropic)
             theta_range (np.ndarray/list): angle for the volume to be sliced at
 
         Returns:
@@ -264,32 +257,27 @@ def radial_slice_sampling(ct_volume, theta_range):
                 dim[2] vector in the xy plane (cos(theta),sin(theta))
     """
 
-    # Cast range of slices to np.ndarray if possible
-    if isinstance(theta_range, list):
-        theta_range = np.array(theta_range)
-
     n_z = ct_volume.shape[0]
-    # n_plane = ct_volume.shape[1]
+    n_xy = ct_volume.shape[1]
 
     z_gr = np.linspace(-1.0, 1.0, n_z)
-    # z_plane = np.linspace(-1.0, 1.0, n_plane)
-    interp = RegularGridInterpolator((z_gr,) *3, ct_volume, fill_value=0)
-    # interp = RegularGridInterpolator((z_gr, *(n_rot_plane,) *2), ct_volume, fill_value=0)
+    xy_gr = np.linspace(-1.0, 1.0, n_xy)
 
-    rad_slices = np.empty((theta_range.shape[0], *ct_volume.shape[:2]), dtype='float32')
-    z_rad = np.vstack((z_gr,) *n_z)    
+    interp = RegularGridInterpolator((z_gr, xy_gr, xy_gr), ct_volume, fill_value=0)
+    rad_slices = np.empty((len(theta_range), *ct_volume.shape[:2]), dtype='float32')
+
+    z_rad = np.vstack((z_gr,) *n_xy).T
 
     for i in range(len(theta_range)):
-        x_rad, y_rad = np.meshgrid(z_gr * np.cos(theta_range[i]), z_gr * -np.sin(theta_range[i]),)
+        x_rad = np.vstack((xy_gr * np.cos(theta_range[i]),) *n_z)
+        y_rad = np.vstack((xy_gr * -np.sin(theta_range[i]),) *n_z)
 
-        rad_slices[i] = interp(np.vstack((z_rad.flatten(),
-                                          x_rad.T.flatten(),
-                                          y_rad.flatten())).T
-                               ).reshape((n_z,)*2).T
+        rad_slices[i] = interp(np.vstack((z_rad.flatten(), x_rad.flatten(), y_rad.flatten())).T
+                               ).reshape(rad_slices.shape[-2:])
     
     return rad_slices
 
-@time_function
+@timeit
 def create_ct_foam_phantom(shape=501, seed=0, gen_new=False):
     """"""
     if gen_new:
@@ -308,7 +296,7 @@ def create_ct_foam_phantom(shape=501, seed=0, gen_new=False):
     return phantom_volume
 
 
-@time_function
+@timeit
 def radial2axial(rad_slices):
     """From https://github.com/Jomigi/Cone_angle_artifact_reduction code.radial2axial.py"""
 
