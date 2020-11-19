@@ -2,8 +2,6 @@ import os
 import random
 from datetime import datetime
 
-import matplotlib.pyplot as plt
-import numpy as np
 import torch
 from torch import nn
 from tqdm import tqdm
@@ -28,7 +26,7 @@ def TVRegularization(scaling=1, in_channels=1):
         return torch.norm(torch.sqrt(sobel(image).pow(2).sum(dim=1)), 1) /image.numel() *scaling
 
     return compute_TV
-    
+
 
 def train(model, dataloaders, loss_criterion, epochs, regularization=None, **kwargs):
 
@@ -59,7 +57,7 @@ def train(model, dataloaders, loss_criterion, epochs, regularization=None, **kwa
     optimizer = torch.optim.Adam(model.msd.parameters(), lr=kwargs.get('lr', 1e-3))
 
     # Evaluate starting state of model
-    compute_loss = lambda t: loss_criterion(t[0], t[1]).item()
+    compute_loss = lambda t: loss_criterion(model(t[0]), t[1]).item()
     best_val = sum(map(compute_loss, val_dl)) /len(val_dl)
     best_state, best_epoch = model.msd.state_dict().copy(), 0
     
@@ -73,7 +71,6 @@ def train(model, dataloaders, loss_criterion, epochs, regularization=None, **kwa
         running_loss = []
 
         for i, (input_, target) in enumerate(batches):
-
             output = model.net(input_)
             loss = loss_criterion(output, target)
             running_loss.append(loss.item())
@@ -88,7 +85,7 @@ def train(model, dataloaders, loss_criterion, epochs, regularization=None, **kwa
             optimizer.zero_grad()
 
             if not i % 2:   
-                batches.set_description(f"epoch {e+1}, loss: {sum(running_loss[-2:]) /2:.3e}")
+                batches.set_description(f"epoch {e+1}, loss: {sum(running_loss[-2:])/2:.3e}")
                 batches.update()
 
         with evaluate(model):
