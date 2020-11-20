@@ -134,7 +134,7 @@ def FDK_reconstruction(projections, scanner_params, proj_vecs=None, voxel_size=.
             scanner_params (class): class containing scanner data
             proj_vecs (np.ndarray): vects describing the scanning used for reconstruction
             voxel_size (float): size of the reconstructed volumes
-            rec_shape (int/tuple): shape of the reconstructed volume tuple with 3 dims [z,y,x] or int if isotropic
+            rec_shape (int/tuple): shape of the reconstructed volume tuple with 3 dims [z,x,y] or int if isotropic
 
             --optional--
             gpu_id (int): GPU for astra to use if not set globaly, defaults to -1
@@ -151,8 +151,8 @@ def FDK_reconstruction(projections, scanner_params, proj_vecs=None, voxel_size=.
     proj_geom = astra.create_proj_geom('cone_vec', *scanner_params.detector_binned_size, proj_vecs)    
     projections_id = astra.data3d.create('-sino', proj_geom, projections)
 
-    # [z,y,x] to [y,x,z] axis transposition
-    reconstructed_shape = tuple([rec_shape[i] for i in [2,0,1]]) if isinstance(rec_shape, tuple) else (rec_shape,) *3
+    # [z,x,y] to [y,x,z] axis transposition
+    reconstructed_shape = tuple([rec_shape[i] for i in [2,1,0]]) if isinstance(rec_shape, tuple) else (rec_shape,) *3
     vol_geom = astra.creators.create_vol_geom(*reconstructed_shape,
         *[sign*size/2*voxel_size for size in reconstructed_shape for sign in [-1, 1]]
     )
