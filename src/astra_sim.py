@@ -104,12 +104,12 @@ def create_CB_projection(ct_volume, scanner_params, proj_vecs, voxel_size=.1, **
 
     astra.astra.set_gpu_index(globals().get('GPU_ID', kwargs.get('gpu_id', -1)))
 
-    # [y,x,z] axis order
+    # [y,x,z] axis order for size, [x,y,z] for volume shape, why...?
     vol_geom = astra.creators.create_vol_geom(*np.transpose(ct_volume, (1,2,0)).shape,
-        *[sign*size/2*voxel_size for size in np.transpose(ct_volume, (1,2,0)).shape for sign in [-1,1]]
+        *[sign*size/2*voxel_size for size in np.transpose(ct_volume, (2,1,0)).shape for sign in [-1,1]]
     )
 
-    # [z,y,x] axis order
+    # [z,x,y] axis order for volume data
     proj_id = astra.data3d.create('-vol', vol_geom, data=ct_volume)    
     proj_geom = astra.create_proj_geom('cone_vec', 
                                        *scanner_params.detector_binned_size, 
