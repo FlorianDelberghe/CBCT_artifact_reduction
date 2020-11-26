@@ -55,6 +55,8 @@ def train(model, dataloaders, loss_criterion, epochs, regularization=None, **kwa
 
     model.set_normalization(train_dl)
     optimizer = torch.optim.Adam(model.msd.parameters(), lr=kwargs.get('lr', 1e-3))
+    gamma = 1e-2 **(1/(epochs-10))
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
 
     # Evaluate starting state of model
     compute_loss = lambda t: loss_criterion(model(t[0]), t[1]).item()
@@ -84,22 +86,26 @@ def train(model, dataloaders, loss_criterion, epochs, regularization=None, **kwa
             optimizer.step()
             optimizer.zero_grad()
 
-            if not i % 2:   
-                batches.set_description(f"epoch {e+1}, loss: {sum(running_loss[-2:])/2:.3e}")
-                batches.update()
+            batches.set_description(f"epoch {e+1}, loss: {sum(running_loss[-2:])/2:.3e}")
+            batches.update()
 
-        with evaluate(model):
-            # Evaluation on subset of val set upper bounded by n_val_samples
-            val_loss = sum(map(compute_loss, val_dl)) /len(val_dl)
-            tr_loss = sum(running_loss) /len(running_loss)
-            running_loss.clear()
-            loss_tracker.update(tr_loss, val_loss)
-            loss_tracker.plot(filename=f'{save_folder}/training_losses.png')
+            if not i % 10:
+                with evaluate(model):
+                    # Evaluation on subset of val set upper bounded by n_val_samples
+                    val_loss = sum(map(compute_loss, val_dl)) /len(val_dl)
+                    tr_loss = sum(running_loss) /len(running_loss)
+                    running_loss.clear()
+                    loss_tracker.update(e*len(train_dl)+i+1, tr_loss, val_loss)
 
-            if val_loss < best_val:
-                best_val, best_epoch = val_loss, e+1
-                best_state = model.msd.state_dict()
-            print(f"Validation loss: {val_loss:.4e}", flush=True)
+        if e+1 >= 10: scheduler.step()
+        loss_tracker.plot(filename=f'{save_folder}/training_losses.png',
+                          xticks=[i*len(train_dl) for i in range(e+2)])
+
+        val_loss = sum(map(compute_loss, val_dl)) /len(val_dl)
+        if val_loss < best_val:
+            best_val, best_epoch = val_loss, e+1
+            best_state = model.msd.state_dict()
+        print(f"Validation loss: {val_loss:.4e}", flush=True)
 
         save_val(model, f'outputs/val_ims_e{e+1}.png')
         torch.save(model.msd.state_dict(), f"{save_folder}/model_epoch{e+1}.h5")
