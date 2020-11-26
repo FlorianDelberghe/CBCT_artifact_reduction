@@ -115,13 +115,13 @@ def build_phantom_dataset():
     """Builds dataset with anthropomorphic phantoms"""
     
     DATA_PATH = '/data/fdelberghe/'
-    save_folder = os.path.join(DATA_PATH, 'PhantomsRadial/')
+    save_folder = os.path.join(DATA_PATH, 'PhantomsRadial2/')
     os.makedirs(save_folder, exist_ok=True)
 
-    phantom_folders = [f'PT{i}/'for i in [1, 5, 6, 8, 10]]
+    phantom_folders = [f'PT{i+1}/'for i in range(0,10)]
 
     phantom_input_paths = (
-        sorted(glob.glob(os.path.join(DATA_PATH + f"Phantoms/{folder}/input*.tif")), key=_nat_sort)
+        sorted(glob.glob(os.path.join(DATA_PATH + f"Phantoms/{folder}/*.tif")), key=_nat_sort)
         for folder in phantom_folders)
 
     scanner_params = FleX_ray_scanner()
@@ -130,17 +130,20 @@ def build_phantom_dataset():
     theta_range = np.linspace(0, np.pi, int(np.round(np.sqrt(2) *501)), endpoint=False)
 
     for i, in_paths in enumerate(phantom_input_paths):
-        input_volume = np.stack([imread(file) for file in in_paths], axis=0).astype('float32')[::-1]
+        print(f"Loading {phantom_folders[i]}...")
+        input_volume = np.stack([imread(file) for file in reversed(in_paths)], axis=0).astype('float32')
         input_volume /= input_volume.max()
 
-        # Interpolation of original volume on radial slices 
         interp_shape = (501, 501)
-        z_gr = np.linspace(-input_volume.shape[0] /interp_shape[0] /2, 
-                           input_volume.shape[0] /interp_shape[0] /2,
-                           input_volume.shape[0])
-        xy_gr = np.linspace(-1.0, 1.0, input_volume.shape[1])
+        # Creates grid center on volume center regardless of volume shape
+        z_gr = np.linspace(-input_volume.shape[0] /interp_shape[0] /1001 *501,
+                          input_volume.shape[0] /interp_shape[0] /1001 *501,
+                          input_volume.shape[0])
+        x_gr, y_gr = [np.linspace(-input_volume.shape[j] /interp_shape[1] /1001 *501,
+                                  input_volume.shape[j] /interp_shape[1] /1001 *501,
+                                  input_volume.shape[j]) for j in range(1,3)]
 
-        interp = RegularGridInterpolator((z_gr, xy_gr, xy_gr), input_volume, fill_value=0, bounds_error=False)
+        interp = RegularGridInterpolator((z_gr, x_gr, y_gr), input_volume, fill_value=0, bounds_error=False)
         rad_slices_input = np.empty((len(theta_range), *interp_shape), dtype='float32')
         
         z_gr = np.linspace(-1.0, 1.0, interp_shape[0])
@@ -155,12 +158,10 @@ def build_phantom_dataset():
             rad_slices_input[j] = interp(np.vstack((z_rad.flatten(), x_rad.flatten(), y_rad.flatten())).T
                                 ).reshape(rad_slices_input.shape[-2:])
 
-
         # Voxel size for whole cube volume within scan FoV
-        vox_sz = scanner_params.source_origin_dist / (scanner_params.source_detector_dist/min(scanner_params.FoV) +.5) /max(input_volume.shape[-2:])
-        projections = astra_sim.create_CB_projection(input_volume, scanner_params, proj_vecs=scanner_traj, voxel_size=vox_sz)
-
-        reconstructed_volume = astra_sim.FDK_reconstruction(projections, scanner_params, proj_vecs=scanner_traj, voxel_size=vox_sz *1001/501)
+        vox_sz = scanner_params.source_origin_dist /(scanner_params.source_detector_dist /min(scanner_params.FoV) +.5) /1001
+        projections = astra_sim.create_CB_projection(input_volume, scanner_params, proj_vecs=scanner_traj, voxel_size=vox_sz, gpu_id=GPU_ID)
+        reconstructed_volume = astra_sim.FDK_reconstruction(projections, scanner_params, proj_vecs=scanner_traj, voxel_size=vox_sz *1001/501, gpu_id=GPU_ID)
 
         rad_slices_CB = radial_slice_sampling(reconstructed_volume, theta_range)
 
@@ -169,4 +170,69 @@ def build_phantom_dataset():
             print(f"\rSaving {phantom_folders[i]} s{j+1:0>3d}", end=' '*5)        
             imsave(os.path.join(save_folder, phantom_folders[i], f'CB_source_s{j+1:0>4d}.tif'), rad_slices_CB[j])
             imsave(os.path.join(save_folder, phantom_folders[i], f'CT_target_s{j+1:0>4d}.tif'), rad_slices_input[j])
+        print('')
 
+
+def build_transposed_phantom_dataset():
+    
+    DATA_PATH = '/data/fdelberghe/'
+    save_folder = os.path.join(DATA_PATH, 'PhantomsTransposedRadial/')
+    os.makedirs(save_folder, exist_ok=True)
+
+    phantom_folders = [f'PT{i+1}/'for i in range(0,10)]
+
+    phantom_input_paths = (
+        sorted(glob.glob(os.path.join(DATA_PATH + f"Phantoms/{folder}/*.tif")), key=_nat_sort)
+        for folder in phantom_folders)
+
+    scanner_params = FleX_ray_scanner()
+    scanner_traj = astra_sim.create_scan_geometry(scanner_params, n_projs=1200)
+    
+    theta_range = np.linspace(0, np.pi, int(np.round(np.sqrt(2) *501)), endpoint=False)
+
+    for i, in_paths in enumerate(phantom_input_paths):
+        print(f"Loading {phantom_folders[i]}...")
+        input_volume = np.stack([imread(file) for file in reversed(in_paths)], axis=0).astype('float32')
+        input_volume = np.transpose(input_volume, (1,0,2)) /input_volume.max()
+
+        interp_shape = (501, 501)
+        # Creates grid center on volume center regardless of volume shape
+        z_gr = np.linspace(-input_volume.shape[0] /interp_shape[0] /1001 *501,
+                          input_volume.shape[0] /interp_shape[0] /1001 *501,
+                          input_volume.shape[0])
+        x_gr, y_gr = [np.linspace(-input_volume.shape[j] /interp_shape[1] /1001 *501,
+                                  input_volume.shape[j] /interp_shape[1] /1001 *501,
+                                  input_volume.shape[j]) for j in range(1,3)]
+
+        interp = RegularGridInterpolator((z_gr, x_gr, y_gr), input_volume, fill_value=0, bounds_error=False)
+        rad_slices_input = np.empty((len(theta_range), *interp_shape), dtype='float32')
+
+
+        z_gr = np.linspace(-1.0, 1.0, interp_shape[0])
+        xy_gr = np.linspace(-1.0, 1.0, interp_shape[1])
+
+        z_rad = np.vstack((z_gr,) *interp_shape[1]).T
+
+        for j in range(len(theta_range)):
+            x_rad = np.vstack((xy_gr * np.cos(theta_range[j]),) *interp_shape[0])
+            y_rad = np.vstack((xy_gr * -np.sin(theta_range[j]),) *interp_shape[0])
+
+            rad_slices_input[j] = interp(np.vstack((z_rad.flatten(), x_rad.flatten(), y_rad.flatten())).T
+                                ).reshape(rad_slices_input.shape[-2:])
+
+        # Voxel size for whole cube volume within scan FoV
+        vox_sz = scanner_params.source_origin_dist /(scanner_params.source_detector_dist /min(scanner_params.FoV) +.5) /1001
+        projections = astra_sim.create_CB_projection(input_volume, scanner_params, proj_vecs=scanner_traj, voxel_size=vox_sz, gpu_id=GPU_ID)
+        reconstructed_volume = astra_sim.FDK_reconstruction(projections, scanner_params, proj_vecs=scanner_traj, voxel_size=vox_sz *1001/501, gpu_id=GPU_ID)
+        rad_slices_CB = radial_slice_sampling(reconstructed_volume, theta_range)
+
+        os.makedirs(os.path.join(save_folder, phantom_folders[i]), exist_ok=True)
+        for j in range(len(theta_range)):    
+            print(f"\rSaving {phantom_folders[i]} s{j+1:0>3d}", end=' '*5)        
+            imsave(os.path.join(save_folder, phantom_folders[i], f'CB_source_s{j+1:0>4d}.tif'), rad_slices_CB[j])
+            imsave(os.path.join(save_folder, phantom_folders[i], f'CT_target_s{j+1:0>4d}.tif'), rad_slices_input[j])
+        print('')
+    
+
+GPU_ID = 2
+build_transposed_phantom_dataset()

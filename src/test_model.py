@@ -1,36 +1,31 @@
-import argparse
 import glob
 import os
+import pathlib
 import random
 import sys
 import time
 from datetime import datetime
 
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
 import torch
-from skimage.metrics import structural_similarity
 from skimage.filters import threshold_multiotsu
-from imageio import imread
-from msd_pytorch import MSDRegressionModel
+from skimage.metrics import structural_similarity
 from torch.utils.data import DataLoader
-from torch.utils.data import dataset
-from tqdm import tqdm
 
 from . import utils
-from .image_dataset import ImageDataset, data_augmentation
+from .image_dataset import ImageDataset
 from .unet_regr_model import UNetRegressionModel
-from .utils import ValSampler, imsave, evaluate
+from .utils import ValSampler, evaluate, imsave
 
 
-def test(model, dataset):
+def test(model, dataloader):
     """Computes metrics ['MSE', 'SSIM', 'DSC'] for provifded model and sample of dataset"""
 
-    te_dl = DataLoader(dataset, batch_size=1, sampler=ValSampler(len(dataset), n_samples=100))
-
-    metrics = np.empty((3, len(te_dl)))
+    metrics = np.empty((3, len(dataloader)))
     with evaluate(model):
-        for i, (input_, target) in enumerate(te_dl):
+        for i, (input_, target) in enumerate(dataloader):
             pred = model(input_)
 
             metrics[:,i] = mse(pred, target), ssim(pred, target), dsc(pred, target)                   
@@ -79,26 +74,88 @@ def noise_robustness(model, dataset, noise='gaussian', **kwargs):
     plt.close(fig)
 
 
-def compare_models(model1, model2, dataset):
+def compare_models(models, dataloader, names=None, title=None):
     
-    te_dl = DataLoader(dataset, batch_size=1, sampler=ValSampler(len(dataset), n_samples=100))
+    n_models = len(models)
+    names = [f'Model{i+1}' for i in range(n_models)] if names is None else names
 
-    metrics = np.empty((6, len(te_dl)))
-    with evaluate(model1), evaluate(model2):
-        for i, (input_, target) in enumerate(te_dl):
-            pred1 = model1(input_)
-            pred2 = model2(input_)
+    metrics = np.empty((3 *n_models, len(dataloader)))
+    with evaluate(*models):
+        for i, (input_, target) in enumerate(dataloader):
+            preds = [model(input_) for model in models]
 
-            metrics[:2,i] = mse(pred1, target), mse(pred2, target)
-            metrics[2:4,i] = ssim(pred1, target), ssim(pred2, target)
-            metrics[4:6,i] = dsc(pred1, target), dsc(pred2, target)                        
+            metrics[:n_models,i] = [mse(pred, target) for pred in preds]
+            metrics[n_models:2*n_models,i] = [ssim(pred, target) for pred in preds]
+            metrics[2*n_models:,i] = [dsc(pred, target) for pred in preds]                    
 
-        print("Model1 \n\tMSE:  {mse_mean:.4e} \n\tSSIM: {ssim_mean:.4f} \n\tDSC:  {dsc_mean:.4f}".format(
-            mse_mean=metrics[0].mean(), ssim_mean=metrics[2].mean(), dsc_mean=metrics[4].mean()
-        ))
-        print("Model2 \n\tMSE:  {mse_mean:.4e} \n\tSSIM: {ssim_mean:.4f} \n\tDSC:  {dsc_mean:.4f}".format(
-            mse_mean=metrics[1].mean(), ssim_mean=metrics[3].mean(), dsc_mean=metrics[5].mean()
-        ))
+    fig, axes = plt.subplots(ncols=3, figsize=(15,5))
+    
+    metric_names = ['MSE', 'SSIM', 'DSC']
+    for i in range(3):
+        axes[i].boxplot(metrics[n_models*i:n_models*i+n_models].T, positions=np.arange(n_models))
+        axes[i].set_xticklabels(names)
+        axes[i].set_title(metric_names[i])
+
+    plt.suptitle(title)
+    plt.savefig('outputs/model_comparison.png')
+
+
+def plot_metrics_evolution(model, state_dicts, dataset, title=None,
+                           filename='outputs/metrics_evolution.png'):
+
+    n_samples = 100
+    metrics = np.zeros((3, len(state_dicts), n_samples))
+    # Loading the state_dicts from files
+    if isinstance(state_dicts[0], (str, pathlib.Path)):
+        state_dicts = (torch.load(state_dict) for state_dict in state_dicts)
+    te_dl = DataLoader(dataset, batch_size=1, sampler=ValSampler(len(dataset), n_samples=n_samples))
+
+    with evaluate(model):
+        for i, state_dict in enumerate(state_dicts):
+            model.msd.load_state_dict(state_dict)
+            metrics[:,i,:] = np.array(
+                [[mse(model(input_), target), ssim(model(input_), target), dsc(model(input_), target)]
+                 for input_, target in te_dl]).T
+
+    metric_names = ['MSE', 'SSIM', 'DSC']
+    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+
+    fig, ax = plt.subplots(figsize=(10,10))
+    ax2 = ax.twinx()
+
+    xticks = np.arange(metrics.shape[1])
+    line1 = ax.plot(xticks, metrics[0].mean(1), c=colors[0])
+    line2 = ax2.plot(xticks, metrics[1].mean(1), c=colors[1])
+    line3 = ax2.plot(xticks, metrics[2].mean(1), c=colors[2])
+
+    ax.plot(xticks, metrics[0].mean(1) +metrics[0].std(1)/10, c=colors[0], alpha=.3)
+    ax.plot(xticks, metrics[0].mean(1) -metrics[0].std(1)/10, c=colors[0], alpha=.3)
+    ax2.plot(xticks, metrics[1].mean(1) +metrics[1].std(1)/10, c=colors[1], alpha=.3)
+    ax2.plot(xticks, metrics[1].mean(1) -metrics[1].std(1)/10, c=colors[1], alpha=.3)
+    ax2.plot(xticks, metrics[2].mean(1) +metrics[2].std(1)/10, c=colors[2], alpha=.3)
+    ax2.plot(xticks, metrics[2].mean(1) -metrics[2].std(1)/10, c=colors[2], alpha=.3)
+    
+    plt.legend(line1+line2+line3, metric_names)
+    ax.set_xticks(xticks[::2])
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('MSE Loss')
+    ax2.set_ylabel('Similarity Metrics')
+    ax2.set_ylim([0,1])
+    ax2.set_yticks(np.linspace(0,1,11))
+    ax2.yaxis.grid()
+    ax.set_title(title)
+    plt.savefig(filename)
+            
+
+def pred_test_sample(model, dataset, filename='outputs/sample_pred.png'):
+
+    te_dl = DataLoader(dataset, batch_size=1, sampler=ValSampler(len(dataset), 10))
+      
+    with evaluate(model):
+        preds = torch.cat([torch.cat([sample, model(sample), truth], dim=-2)
+                            for sample, truth in te_dl], dim=-1)
+
+    imsave(filename, preds.cpu().squeeze().numpy())
 
 
 # ===== Noise Functions ===== #
@@ -134,6 +191,7 @@ def shot_noise(x, pix_frac=.001):
     x[:,:,pix_coords[0][split_id:], pix_coords[1][split_id:]] = x.mean() -x.std() *4
 
     return x
+
 
 # ===== Metrics ===== #
 def compute_metric(pred, target, metric='MSE'):

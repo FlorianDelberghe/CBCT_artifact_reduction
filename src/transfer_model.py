@@ -27,13 +27,15 @@ def transfer(model, dataloaders, epochs=10, **kwargs):
     tr_losses, val_losses = [sum(map(compute_loss, val_dl)) /len(val_dl)], \
         [sum(map(compute_loss, val_dl)) / len(val_dl)]
     
+    plt_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    
     current_batch = 0
     for e in range(epochs):
         if current_batch > 1e3: break
 
         for i, (input_, target) in enumerate(train_dl):
             current_batch = i + e*len(train_dl)
-            print(f"\rBatch [{current_batch+1:03d}/{len(val_dl)*len(train_dl):04d}]", end=' '*5)
+            print(f"\rBatch [{current_batch+1:03d}/{epochs*len(train_dl):04d}]", end=' '*5)
 
             output = model.net(input_)
             loss = loss_criterion(output, target)
@@ -49,8 +51,8 @@ def transfer(model, dataloaders, epochs=10, **kwargs):
 
             if not current_batch % 20:
                 fig, ax = plt.subplots(figsize=(10,10))
-                ax.plot(np.arange(len(val_losses)), val_losses, label='Validation')
-                ax.plot(np.arange(len(val_losses)), tr_losses, label='Training')
+                ax.plot(np.arange(len(val_losses)), tr_losses, label='Training', color=plt_colors[0])
+                ax.plot(np.arange(len(val_losses)), val_losses, label='Validation', color=plt_colors[1])
 
                 ax.legend(loc='upper right')
                 ax.set_xlabel('batch')
@@ -58,8 +60,8 @@ def transfer(model, dataloaders, epochs=10, **kwargs):
                 ax.set_ylabel('MSE Loss')
                 ax.set_ylim([1e-6,None])
                 ax.yaxis.grid()
-                plt.savefig('outputs/transfer_loss.png', bbox_inches='tight')
+                plt.savefig('outputs/transfer_loss_W_d80.png', bbox_inches='tight')
                 plt.close(fig)
 
-            if current_batch > 1e3: break
+            if current_batch > 500: break
         

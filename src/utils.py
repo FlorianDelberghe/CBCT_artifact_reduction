@@ -140,83 +140,95 @@ def timeit(func):
 
 
 @contextmanager
-def evaluate(model):
-    """Context manager to evaluate models disables grad computation and sets model to eval"""
+def evaluate(*models):
+    """Context manager to evaluate models disables grad computation and sets models to eval"""
 
     try:
         torch.set_grad_enabled(False)
-        model.eval()
+        [model.eval() for model in models]
         yield None
 
     finally:
         torch.set_grad_enabled(True)
-        model.train()
+        [model.train() for model in models]
     
 
+#TODO: unit test for _nat_sort
 _nat_sort = lambda s: [int(c) if c.isdigit() else c for c in re.split("([0-9]+)", s)]
 
 
 def load_walnut_ds():
 
-    DATA_PATH = '/data/fdelberghe/FastWalnuts2/'
-    walnut_folders = [folder for folder in sorted(os.listdir(DATA_PATH), key=_nat_sort) 
-                      if os.path.isdir(os.path.join(DATA_PATH, folder))]
+    ds_path = '/data/fdelberghe/FastWalnuts2/'
+    walnut_folders = [folder for folder in sorted(os.listdir(ds_path), key=_nat_sort) 
+                      if os.path.isdir(os.path.join(ds_path, folder))]
 
-    walnuts_agd_paths = [sorted(glob.glob(os.path.join(DATA_PATH + f"{folder}/agd_*.tif")), key=_nat_sort) 
+    walnuts_agd_paths = [sorted(glob.glob(os.path.join(ds_path + f"{folder}/agd_*.tif")), key=_nat_sort) 
                          for folder in walnut_folders]
     walnuts_fdk_paths = [
-        [sorted(glob.glob(os.path.join(DATA_PATH + f"{folder}/fdk_orbit{orbit_id:02d}*.tif")),
-                key=_nat_sort) for orbit_id in [1, 2, 3]] for folder in walnut_folders]
+        [sorted(glob.glob(os.path.join(ds_path + f"{folder}/fdk_orbit{orbit_id:02d}*.tif")),
+                key=_nat_sort) for orbit_id in [1,2,3]] for folder in walnut_folders]
 
     return walnuts_agd_paths, walnuts_fdk_paths
 
 
 def load_foam_phantom_ds():
 
-    DATA_PATH = '/data/fdelberghe/'
-    phantom_folders = [folder for folder in sorted(os.listdir(os.path.join(DATA_PATH, 'FoamPhantoms/')), key=_nat_sort) 
-                      if os.path.isdir(os.path.join(DATA_PATH, f'FoamPhantoms/{folder}'))]
+    ds_path = '/data/fdelberghe/FoamPhantoms/'
+    phantom_folders = [folder for folder in sorted(os.listdir(ds_path), key=_nat_sort) 
+                      if os.path.isdir(os.path.join(ds_path, folder))]
 
     phantom_agd_paths = [
-        sorted(glob.glob(os.path.join(DATA_PATH + f"FoamPhantoms/{folder}/phantom_true_*.tif")), key=_nat_sort)
+        sorted(glob.glob(os.path.join(ds_path + f"{folder}/phantom_true_*.tif")), key=_nat_sort)
         for folder in phantom_folders]
 
     phantom_fdk_paths = [
-        [sorted(glob.glob(os.path.join(DATA_PATH + f"FoamPhantoms/{folder}/phantom_fdk_*_o{orbit_id}*.tif")), key=_nat_sort)
-         for orbit_id in [1, 2, 3]] for folder in phantom_folders]
+        [sorted(glob.glob(os.path.join(ds_path + f"{folder}/phantom_fdk_*_o{orbit_id}*.tif")), key=_nat_sort)
+         for orbit_id in [1,2,3]] for folder in phantom_folders]
 
     return phantom_agd_paths, phantom_fdk_paths
 
 
-def load_phantom_ds():
+def load_phantom_ds(folder_path='PhantomsRadial2/'):
 
-    DATA_PATH = '/data/fdelberghe/'
-    phantom_folders = [folder for folder in sorted(os.listdir(os.path.join(DATA_PATH, 'Phantoms/')), key=_nat_sort) 
-                      if os.path.isdir(os.path.join(DATA_PATH, f'Phantoms/{folder}'))]
+    ds_path = f'/data/fdelberghe/{folder_path}'
+    phantom_folders = [folder for folder in sorted(os.listdir(ds_path), key=_nat_sort) 
+                      if os.path.isdir(os.path.join(ds_path, folder))]
 
     phantom_target_paths = [
-        sorted(glob.glob(os.path.join(DATA_PATH + f"Phantoms/{folder}/target*.tif")), key=_nat_sort)
+        sorted(glob.glob(os.path.join(ds_path + f"{folder}/CT_target*.tif")), key=_nat_sort)
         for folder in phantom_folders]
 
     phantom_input_paths = [
-        sorted(glob.glob(os.path.join(DATA_PATH + f"Phantoms/{folder}/input*.tif")), key=_nat_sort)
+        sorted(glob.glob(os.path.join(ds_path + f"{folder}/CB_source*.tif")), key=_nat_sort)
          for folder in phantom_folders]
 
     return phantom_target_paths, phantom_input_paths
 
 
+def load_transposed_phatom_ds():
+    return load_phantom_ds('PhantomsTransposedRadial/')
+
+
 class ValSampler(torch.utils.data.Sampler):
     """Samplers to avoid going through the entire validation dataset each time"""
         
-    def __init__(self, dataset_len, n_samples=100):
+    def __init__(self, dataset_len, n_samples=100, fixed_samples=True):
         self.dataset_len = dataset_len
-        self.n_samples = n_samples
+        self.n_samples = int(dataset_len *n_samples) if 0 < n_samples <= 1 else n_samples
+        self.fixed_samples = fixed_samples
+        # Returns the same samples for every iter
+        if fixed_samples:
+            self.samples = random.sample(range(self.dataset_len), self.n_samples)
 
     def __len__(self):
         return self.n_samples
 
     def __iter__(self):
-        return iter(random.sample(range(self.dataset_len-1), self.n_samples))
+        if self.fixed_samples:
+            return iter(self.samples)
+            
+        return iter(random.sample(range(self.dataset_len), self.n_samples))
 
 
 class BatchSampler(torch.utils.data.Sampler):
@@ -227,18 +239,17 @@ class BatchSampler(torch.utils.data.Sampler):
 
 class LossTracker():
 
-    def __init__(self, **kwargs):
+    def __init__(self, starting_iter=0, **kwargs):
         """Function gets losses to track as {'loss_name': loss_init_value,}"""
-        self.progress = [0]
+        self.iters = [starting_iter]
         self.losses = dict(
             ((k, v) if isinstance(v, list) else (k, [v]) for k, v in kwargs.items())
             )
 
-    def update(self, *losses, **named_losses):
-
-        # Same order as __init__
+    def update(self, current_iter, *losses, **named_losses):
+        # Same order as __init__()
         if len(losses) > 0:
-            self.progress.append(self.progress[-1]+1)
+            self.iters.append(current_iter)
             for key, loss in zip(self.losses, losses):
                 self.losses[key].append(loss)
             # One method or the other
@@ -246,7 +257,7 @@ class LossTracker():
 
         # Random order
         if len(named_losses) > 0:
-            self.progress.append(self.progress[-1]+1)
+            self.iters.append(current_iter)
             for name, loss in named_losses.item():
                 self.losses[name].append(loss)
             return
@@ -257,16 +268,18 @@ class LossTracker():
         plt.figure(figsize=(10,10))
 
         for key, loss in self.losses.items():
-            if len(self.progress) == len(loss):
-                plt.plot(self.progress, loss, label=key)
+            if len(self.iters) == len(loss):
+                plt.plot(self.iters, loss, label=key)
             else:
-                plt.plot(list(range(len(loss))), loss, label=key)
+                plt.plot(np.arange(len(loss)), loss, label=key)
 
-        plt.xlabel(kwargs.get('xlabel', 'Epoch'))
-        plt.ylabel(kwargs.get('ylabel', 'Loss'))
-        plt.title(kwargs.get('title', ''))
+        plt.xlabel(kwargs.get('xlabel', 'Batch'))
         plt.xticks(kwargs.get('xticks', 
-                              np.linspace(0, len(self.progress)-1, min(16, len(self.progress))).astype('int16')))
+                              np.linspace(0, self.iters[-1], min(13, len(self.iters))).astype('int16')))
+        plt.grid(axis='x')
+        plt.ylabel(kwargs.get('ylabel', 'Loss'))
+        plt.ylim([0,5e-4])
+        plt.title(kwargs.get('title', ''))
         plt.legend()
         plt.savefig(kwargs.get('filename', 'outputs/training_losses.png'))
 
