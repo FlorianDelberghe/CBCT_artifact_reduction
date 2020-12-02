@@ -1,6 +1,5 @@
 import re
 from pathlib import Path
-from struct import unpack_from
 
 import numpy as np
 from imageio import imsave
@@ -24,35 +23,32 @@ def get_stack_size(file):
 
 def get_slices(file, stack_shape):
 
-    # 16 bits little endian decoding
     blocksize = 2
+    slc_len = stack_shape[1]*stack_shape[0]
+    
+    for i in trange(stack_shape[2], position=0): 
+        # decoding parameters: `<` for little endian, `H` for unsigned short (2 bytes)
+        slc = np.fromfile(file, dtype=np.dtype('<H'), count=slc_len, offset=blocksize*i*slc_len)
 
-    with file.open(mode='rb') as f:
-
-        for _ in trange(stack_shape[2], position=0):
-            slc = np.empty((stack_shape[1]*stack_shape[0],), dtype='uint16')
-
-            for i in range(len(slc)):
-                # decoding parameters: `<` for little endian, `H` for unsigned short (2 bytes)     
-                slc[i] = unpack_from("<H", f.read(blocksize))[0]
-
-            yield slc
+        yield slc.reshape(stack_shape[:2][::-1])
 
 
 DATA_PATH = Path('/data/fdelberghe/')
-phantoms = ['Phantom1_rar', 'Phantom3', 'Phantom6', 'Phantom7']
+IMPORT_PATH = Path('/data/maureen_shares/')
 
-for phantom in phantoms[1:]:
-    vol_file = DATA_PATH / 'Phantoms' / f'{phantom}.vol'
-    hx_file = DATA_PATH / 'Phantoms' / f'{phantom}.hx'
+phantoms = [('Phantom1', 'Phantom1_rar'), ('Phantom3', '226'), ('Phantom6', 'VUMC2.0_rar'), ('Phantom7', '261')]
+
+for phantom, file_name in phantoms:
+    vol_file = IMPORT_PATH / f'{file_name}.vol'
+    hx_file = IMPORT_PATH / f'{file_name}.hx'
 
     stack_shape, stack_size = get_stack_size(hx_file)
 
     save_path = DATA_PATH / 'AxialPhantoms' / phantom
     save_path.mkdir(parents=True, exist_ok=True)
 
+    print(f"Saving {phantom}...")
     for i, slc in enumerate(get_slices(vol_file, stack_shape)):
-        imsave(save_path / f'sliceZ_{i:0>4d}.tif', slc.reshape((stack_shape[1], stack_shape[0])))
-
+        imsave(save_path / f'sliceZ_{i:0>4d}.tif', slc)
 
 
