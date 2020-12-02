@@ -1,15 +1,19 @@
 import glob
 import os
+import re
 import shutil
+import sys
+from pathlib import Path
+import time
 
 import foam_ct_phantom
 import numpy as np
 from imageio import imread, imsave
+from natsort import natsorted
 from scipy.interpolate import RegularGridInterpolator
 
 from . import astra_sim, utils
 from .astra_sim import FleX_ray_scanner, radial_slice_sampling
-from .utils import _nat_sort
 
 
 def build_foam_phantom_dataset(folder_path, n_phantoms, spheres_per_unit=10000, GPU_ID=0):
@@ -74,20 +78,20 @@ def build_foam_phantom_dataset(folder_path, n_phantoms, spheres_per_unit=10000, 
 
 def build_fast_walnut_dataset():
     
-    DATA_PATH = '/data/fdelberghe/'
-    save_folder = '/data/fdelberghe/FastWalnuts2/'
+    DATA_PATH = Path('/data/fdelberghe/')
+    save_folder = DATA_PATH/'FastWalnuts2/'
 
-    os.makedirs(save_folder, exist_ok=True)
+    save_folder.mkdir(parents=True, exist_ok=True)
     
     # Lists subdirs
-    for folder in sorted(glob.glob(os.path.join(DATA_PATH, 'Walnuts/Walnut*'))):
-        print(f"Loading: {folder}...")
-        
-        os.makedirs(os.path.join(save_folder, folder.split('/')[-1]), exist_ok=True)
+    walnuts_folders = natsorted(list(filter(lambda p: re.search(r'/Walnut\d+$', p.as_posix()),
+                                            DATA_PATH.glob('Walnuts/*'))))
+    for folder in walnuts_folders:
+        print(f"Loading {folder}/...")
 
-        agd_images = sorted(glob.glob(os.path.join(folder, 'Reconstructions/full_AGD_50*.tiff')))
-        fdk_images = [sorted(glob.glob(os.path.join(folder, f'Reconstructions/fdk_pos{orbit}*.tiff'))) 
-                      for orbit in range(1, 4)]
+        agd_images = natsorted(folder.glob('Reconstructions/full_AGD_50*.tif'))
+        fdk_images = [natsorted(folder.glob(f'Reconstructions/fdk_pos{orbit}*.tiff')) 
+                      for orbit in (1,2,3)]
 
         agd_volume = np.stack([imread(file) for file in agd_images], axis=0)
         fdk_volumes = [np.stack([imread(file) for file in fdk_orbit], axis=0) for fdk_orbit in fdk_images]
@@ -97,9 +101,12 @@ def build_fast_walnut_dataset():
 
         adg_rad_slices = radial_slice_sampling(agd_volume, theta_range)
 
+        # makes save folder
+        (save_folder/folder.name).mkdir(parents=True, exist_ok=True)
+
         for i in range(len(adg_rad_slices)):
             print(f"\rSaving agd_s{i+1:0>3d}.tif", end=' '*5)
-            imsave(os.path.join(save_folder, folder.split('/')[-1], f"agd_s{i+1:0>3d}.tif"), adg_rad_slices[i])
+            imsave((save_folder/folder.name/ f'agd_s{i+1:0>3d}.tif'), adg_rad_slices[i])
         print('')
 
         for j, fdk_volume in enumerate(fdk_volumes):
@@ -107,132 +114,78 @@ def build_fast_walnut_dataset():
 
             for i in range(len(fdk_rad_slices)):
                 print(f"\rSaving fdk_orbit{j+1:0>2d}_s{i+1:0>3d}.tif", end=' '*5)
-                imsave(os.path.join(save_folder, folder.split('/')[-1], f"fdk_orbit{j+1:0>2d}_s{i+1:0>3d}.tif"), fdk_rad_slices[i])
+                imsave((save_folder/folder.name/ f'fdk_orbit{j+1:0>2d}_s{i+1:0>3d}.tif'), fdk_rad_slices[i])
             print('')
 
 
-def build_phantom_dataset():
+def build_phantom_dataset(gpu_id=2):
     """Builds dataset with anthropomorphic phantoms"""
     
-    DATA_PATH = '/data/fdelberghe/'
-    save_folder = os.path.join(DATA_PATH, 'PhantomsRadial2/')
-    os.makedirs(save_folder, exist_ok=True)
+    DATA_PATH = Path('/data/fdelberghe/')
+    save_folder = DATA_PATH/'PhantomsRadial/'
 
-    phantom_folders = [f'PT{i+1}/'for i in range(0,10)]
-
-    phantom_input_paths = (
-        sorted(glob.glob(os.path.join(DATA_PATH + f"Phantoms/{folder}/*.tif")), key=_nat_sort)
-        for folder in phantom_folders)
+    phantom_folders = natsorted(DATA_PATH.glob('AxialPhantoms/*'))
 
     scanner_params = FleX_ray_scanner()
-    scanner_traj = astra_sim.create_scan_geometry(scanner_params, n_projs=1200)
+    scanner_trajs = [astra_sim.create_scan_geometry(scanner_params, n_projs=1200, elevation=el) for el in [-15, 0, 15]]
     
     theta_range = np.linspace(0, np.pi, int(np.round(np.sqrt(2) *501)), endpoint=False)
 
-    for i, in_paths in enumerate(phantom_input_paths):
-        print(f"Loading {phantom_folders[i]}...")
-        input_volume = np.stack([imread(file) for file in reversed(in_paths)], axis=0).astype('float32')
-        input_volume /= input_volume.max()
+    for folder in [phantom_folders[0], phantom_folders[-1]]:
+        print(f"Loading {folder}/...")        
 
-        interp_shape = (501, 501)
-        # Creates grid center on volume center regardless of volume shape
-        z_gr = np.linspace(-input_volume.shape[0] /interp_shape[0] /1001 *501,
-                          input_volume.shape[0] /interp_shape[0] /1001 *501,
-                          input_volume.shape[0])
-        x_gr, y_gr = [np.linspace(-input_volume.shape[j] /interp_shape[1] /1001 *501,
-                                  input_volume.shape[j] /interp_shape[1] /1001 *501,
-                                  input_volume.shape[j]) for j in range(1,3)]
-
-        interp = RegularGridInterpolator((z_gr, x_gr, y_gr), input_volume, fill_value=0, bounds_error=False)
-        rad_slices_input = np.empty((len(theta_range), *interp_shape), dtype='float32')
+        axial_ims = sorted(folder.glob('*.tif'), key=utils._nat_sort)
+        input_volume = np.stack([imread(file) for file in axial_ims], axis=0).astype('float32')
+        # Estimates the air density from mean intensity at the edges of the volume
+        dark_field = np.mean([input_volume[0].mean(), input_volume[:,0].mean(), input_volume[:,:,0].mean(), input_volume[:,:,-1].mean()])
+        input_volume = (input_volume -dark_field) /(input_volume.max() -dark_field)
         
-        z_gr = np.linspace(-1.0, 1.0, interp_shape[0])
-        xy_gr = np.linspace(-1.0, 1.0, interp_shape[1])
-
-        z_rad = np.vstack((z_gr,) *interp_shape[1]).T
-
-        for j in range(len(theta_range)):
-            x_rad = np.vstack((xy_gr * np.cos(theta_range[j]),) *interp_shape[0])
-            y_rad = np.vstack((xy_gr * -np.sin(theta_range[j]),) *interp_shape[0])
-
-            rad_slices_input[j] = interp(np.vstack((z_rad.flatten(), x_rad.flatten(), y_rad.flatten())).T
-                                ).reshape(rad_slices_input.shape[-2:])
-
-        # Voxel size for whole cube volume within scan FoV
-        vox_sz = scanner_params.source_origin_dist /(scanner_params.source_detector_dist /min(scanner_params.FoV) +.5) /1001
-        projections = astra_sim.create_CB_projection(input_volume, scanner_params, proj_vecs=scanner_traj, voxel_size=vox_sz, gpu_id=GPU_ID)
-        reconstructed_volume = astra_sim.FDK_reconstruction(projections, scanner_params, proj_vecs=scanner_traj, voxel_size=vox_sz *1001/501, gpu_id=GPU_ID)
-
-        rad_slices_CB = radial_slice_sampling(reconstructed_volume, theta_range)
-
-        os.makedirs(os.path.join(save_folder, phantom_folders[i]), exist_ok=True)
-        for j in range(len(theta_range)):    
-            print(f"\rSaving {phantom_folders[i]} s{j+1:0>3d}", end=' '*5)        
-            imsave(os.path.join(save_folder, phantom_folders[i], f'CB_source_s{j+1:0>4d}.tif'), rad_slices_CB[j])
-            imsave(os.path.join(save_folder, phantom_folders[i], f'CT_target_s{j+1:0>4d}.tif'), rad_slices_input[j])
-        print('')
-
-
-def build_transposed_phantom_dataset():
-    
-    DATA_PATH = '/data/fdelberghe/'
-    save_folder = os.path.join(DATA_PATH, 'PhantomsTransposedRadial/')
-    os.makedirs(save_folder, exist_ok=True)
-
-    phantom_folders = [f'PT{i+1}/'for i in range(0,10)]
-
-    phantom_input_paths = (
-        sorted(glob.glob(os.path.join(DATA_PATH + f"Phantoms/{folder}/*.tif")), key=_nat_sort)
-        for folder in phantom_folders)
-
-    scanner_params = FleX_ray_scanner()
-    scanner_traj = astra_sim.create_scan_geometry(scanner_params, n_projs=1200)
-    
-    theta_range = np.linspace(0, np.pi, int(np.round(np.sqrt(2) *501)), endpoint=False)
-
-    for i, in_paths in enumerate(phantom_input_paths):
-        print(f"Loading {phantom_folders[i]}...")
-        input_volume = np.stack([imread(file) for file in reversed(in_paths)], axis=0).astype('float32')
-        input_volume = np.transpose(input_volume, (1,0,2)) /input_volume.max()
-
         interp_shape = (501, 501)
+        # interp the volume in a box the size of the largest axis
+        max_in_dim = max(input_volume.shape)
+
         # Creates grid center on volume center regardless of volume shape
-        z_gr = np.linspace(-input_volume.shape[0] /interp_shape[0] /1001 *501,
-                          input_volume.shape[0] /interp_shape[0] /1001 *501,
+        z_gr = np.linspace(-input_volume.shape[0] /interp_shape[0] /max_in_dim *501,
+                          input_volume.shape[0] /interp_shape[0] /max_in_dim *501,
                           input_volume.shape[0])
-        x_gr, y_gr = [np.linspace(-input_volume.shape[j] /interp_shape[1] /1001 *501,
-                                  input_volume.shape[j] /interp_shape[1] /1001 *501,
+        x_gr, y_gr = [np.linspace(-input_volume.shape[j] /interp_shape[1] /max_in_dim *501,
+                                  input_volume.shape[j] /interp_shape[1] /max_in_dim *501,
                                   input_volume.shape[j]) for j in range(1,3)]
 
         interp = RegularGridInterpolator((z_gr, x_gr, y_gr), input_volume, fill_value=0, bounds_error=False)
-        rad_slices_input = np.empty((len(theta_range), *interp_shape), dtype='float32')
-
 
         z_gr = np.linspace(-1.0, 1.0, interp_shape[0])
         xy_gr = np.linspace(-1.0, 1.0, interp_shape[1])
 
         z_rad = np.vstack((z_gr,) *interp_shape[1]).T
 
+        (save_folder/folder.name).mkdir(parents=True, exist_ok=True)
+
         for j in range(len(theta_range)):
             x_rad = np.vstack((xy_gr * np.cos(theta_range[j]),) *interp_shape[0])
             y_rad = np.vstack((xy_gr * -np.sin(theta_range[j]),) *interp_shape[0])
 
-            rad_slices_input[j] = interp(np.vstack((z_rad.flatten(), x_rad.flatten(), y_rad.flatten())).T
-                                ).reshape(rad_slices_input.shape[-2:])
+            rad_slices_input = interp(np.vstack((z_rad.flatten(), x_rad.flatten(), y_rad.flatten())).T
+                                ).reshape(interp_shape)
+
+            print(f"\rSaving {folder.name}/CT_target_s{j+1:0>3d}", end=' '*5)  
+            imsave((save_folder/folder.name/ f'CT_target_s{j+1:0>4d}.tif'), rad_slices_input.astype('float32'))
+        print('')
 
         # Voxel size for whole cube volume within scan FoV
-        vox_sz = scanner_params.source_origin_dist /(scanner_params.source_detector_dist /min(scanner_params.FoV) +.5) /1001
-        projections = astra_sim.create_CB_projection(input_volume, scanner_params, proj_vecs=scanner_traj, voxel_size=vox_sz, gpu_id=GPU_ID)
-        reconstructed_volume = astra_sim.FDK_reconstruction(projections, scanner_params, proj_vecs=scanner_traj, voxel_size=vox_sz *1001/501, gpu_id=GPU_ID)
-        rad_slices_CB = radial_slice_sampling(reconstructed_volume, theta_range)
+        vox_sz = scanner_params.source_origin_dist /(scanner_params.source_detector_dist /min(scanner_params.FoV) +.5) /max_in_dim
 
-        os.makedirs(os.path.join(save_folder, phantom_folders[i]), exist_ok=True)
-        for j in range(len(theta_range)):    
-            print(f"\rSaving {phantom_folders[i]} s{j+1:0>3d}", end=' '*5)        
-            imsave(os.path.join(save_folder, phantom_folders[i], f'CB_source_s{j+1:0>4d}.tif'), rad_slices_CB[j])
-            imsave(os.path.join(save_folder, phantom_folders[i], f'CT_target_s{j+1:0>4d}.tif'), rad_slices_input[j])
-        print('')
-    
+        for i, scanner_traj in enumerate(scanner_trajs):
+            projections = astra_sim.create_CB_projection(input_volume, scanner_params, proj_vecs=scanner_traj, voxel_size=vox_sz, gpu_id=gpu_id)
+            reconstructed_volume = astra_sim.FDK_reconstruction(projections, scanner_params, proj_vecs=scanner_traj, voxel_size=vox_sz *max_in_dim/501, gpu_id=gpu_id)
 
-GPU_ID = 2
-build_transposed_phantom_dataset()
+            rad_slices_CB = radial_slice_sampling(reconstructed_volume, theta_range)
+            
+            for j in range(len(theta_range)):    
+                print(f"\rSaving {folder.name}/CB_source_s{j+1:0>3d}", end=' '*5)     
+                imsave((save_folder/folder.name/ f'CB_source_orbit{i+1:0>2d}_s{j+1:0>4d}.tif'), rad_slices_CB[j])
+            print('')
+   
+
+if __name__ == '__main__':
+    build_phantom_dataset()
