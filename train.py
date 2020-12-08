@@ -2,6 +2,7 @@ import argparse
 import glob
 import os
 import random
+import sys
 from datetime import datetime
 
 import torch
@@ -12,20 +13,13 @@ from torch.utils.data import DataLoader
 import src.utils as utils
 from src.image_dataset import MultiOrbitDataset
 from src.train_model import TVRegularization, train
-from src.unet_regr_model import UNetRegressionModel
 from src.utils import ValSampler, _nat_sort
-                    
+import src.models as models
 
 
 def train_model():    
     target_ims, input_ims = utils.load_walnut_ds()
-
-    random.seed(SEED)
-    val_id = random.randrange(len(target_ims))
-    print(f"Using sample {val_id} as validation")
-
-    input_val, target_val = [input_ims.pop(val_id)], [target_ims.pop(val_id)]
-    input_tr, target_tr = input_ims, target_ims
+    test_set, val_set, train_set = utils.split_data(input_ims, target_ims)
 
     model_params = {'c_in': 1, 'c_out': 1, 'depth': 30, 'width': 1,
                         'dilations': [1,2,4,8,16], 'loss': 'L2'}
@@ -34,14 +28,16 @@ def train_model():
     #     torch.load(sorted(glob.glob('model_weights/MSD_d30_Walnuts_scratch_1120175735/best*.h5'), key=_nat_sort)[-1]))
 
     batch_size = 32
-    train_dl = DataLoader(MultiOrbitDataset(input_tr, target_tr, device='cuda'), batch_size=batch_size, shuffle=True)
-    val_ds = MultiOrbitDataset(input_val, target_val, device='cuda')
+    train_ds = MultiOrbitDataset(*train_set, device='cuda')
+    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+    val_ds = MultiOrbitDataset(*val_set, device='cuda')
     val_dl = DataLoader(val_ds, batch_size=batch_size, sampler=ValSampler(len(val_ds)))
     
     kwargs = {}
     if MODEL_NAME is not None:
         kwargs['save_folder'] = f"model_weights/{MODEL_NAME}_{datetime.now().strftime('%m%d%H%M%S')}"
 
+    model.set_normalization(DataLoader(train_ds, batch_size=100, sampler=ValSampler(len(train_ds), min(len(train_ds), 5000))))
     train(model, (train_dl, val_dl), nn.MSELoss(), 20, lr=2e-3, **kwargs)
 
 
