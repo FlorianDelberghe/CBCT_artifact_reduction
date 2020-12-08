@@ -5,6 +5,7 @@ __pycache__/
 outputs/
 WalnutReconstructionCodes/
 code/
+report/
 
 # Files:
 *.log

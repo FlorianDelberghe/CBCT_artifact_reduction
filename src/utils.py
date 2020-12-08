@@ -4,6 +4,7 @@ import random
 import re
 import time
 from contextlib import contextmanager
+from pathlib import PurePath ,Path
 
 import imageio
 import matplotlib.pyplot as plt
@@ -154,7 +155,11 @@ def evaluate(*models):
     
 
 #TODO: unit test for _nat_sort
-_nat_sort = lambda s: [int(c) if c.isdigit() else c for c in re.split("([0-9]+)", s)]
+def _nat_sort(path):
+    if isinstance(path, PurePath):
+        return [int(c) if c.isdigit() else c for c in re.split("([0-9]+)", path.as_posix())]
+    
+    return [int(c) if c.isdigit() else c for c in re.split("([0-9]+)", path)]
 
 
 def load_walnut_ds():
@@ -189,25 +194,39 @@ def load_foam_phantom_ds():
     return phantom_agd_paths, phantom_fdk_paths
 
 
-def load_phantom_ds(folder_path='PhantomsRadial2/'):
+def load_phantom_ds(folder_path='PhantomsRadial/'):
 
-    ds_path = f'/data/fdelberghe/{folder_path}'
-    phantom_folders = [folder for folder in sorted(os.listdir(ds_path), key=_nat_sort) 
-                      if os.path.isdir(os.path.join(ds_path, folder))]
+    ds_path = Path('/data/fdelberghe/') /folder_path
 
-    phantom_target_paths = [
-        sorted(glob.glob(os.path.join(ds_path + f"{folder}/CT_target*.tif")), key=_nat_sort)
-        for folder in phantom_folders]
+    phatom_folders = sorted(ds_path.glob('*/'), key=_nat_sort)
 
-    phantom_input_paths = [
-        sorted(glob.glob(os.path.join(ds_path + f"{folder}/CB_source*.tif")), key=_nat_sort)
-         for folder in phantom_folders]
+    phantom_truth_paths = [sorted(folder.glob('CT_target_*.tif'), key=_nat_sort) for folder in phatom_folders]
+    phantom_fdk_paths = [[sorted(folder.glob(f'CB_source_orbit{orbit_id:0>2d}_*.tif'), key=_nat_sort)
+                          for orbit_id in [1,2,3]] for folder in phatom_folders]
 
-    return phantom_target_paths, phantom_input_paths
+    return phantom_truth_paths, phantom_fdk_paths
 
 
 def load_transposed_phatom_ds():
     return load_phantom_ds('PhantomsTransposedRadial/')
+
+
+def split_data(input_ims, target_ims, frac=7/42, seed=0):
+
+    n_test = n_val = int(np.round(len(input_ims) *frac))
+    
+    random.seed(seed)
+    zipped_ims = random.sample([
+        (i, input_im, target_im) for i, (input_im, target_im) in enumerate(zip(input_ims, target_ims))
+    ], len(target_ims))
+
+    ids_te, *test_set = tuple(zip(*zipped_ims[:n_test]))
+    ids_val, *val_set = tuple(zip(*zipped_ims[n_test:n_test+n_val]))
+    ids_tr, *train_set = tuple(zip(*zipped_ims[n_test+n_val:]))
+
+    print(f"Sample indices for test: {ids_te}, validation: {ids_val}, training: {ids_tr}")
+
+    return test_set, val_set, train_set
 
 
 class ValSampler(torch.utils.data.Sampler):

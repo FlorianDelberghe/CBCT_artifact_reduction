@@ -91,26 +91,18 @@ def _load_natural_image(path):
 def data_augmentation(func):
     """__getitem__() decorator to add ability to augment the data"""
 
-    def random_flip(*ts, p):
-        """Random flip along one of the image axis X or Y with p iid"""
+    def random_flip(*ts, p=0):
+        """Random flip along one of the image axis Y with p"""
         
-        if p > 3/4:
-            return ts
-        elif p > 1/2:
-            return tuple(map(lambda t: torch.flip(t, (-1,)), ts))
-        elif p > 1/4:
-            return tuple(map(lambda t: torch.flip(t, (-2,)), ts))
-        else:
-            return tuple(map(lambda t: torch.flip(t, (-1,-2)), ts))
-            
+        if p > .5:
+            return tuple(map(lambda t: torch.flip(t, (-2,)), ts))      
+
+        return ts            
                 
     def _data_aug(self, *args, **kwargs):
 
         image, target = func(self, *args, **kwargs)
-        if self.data_augmentation: 
-            image, target = random_flip(*(image, target), p=random.random())        
-
-        return image, target
+        return random_flip(*(image, target), p=random.random()*self.data_augmentation)        
 
     return _data_aug
 
@@ -336,7 +328,12 @@ class ImageDataset(Dataset):
 
     @data_augmentation
     def __getitem__(self, i):
-        return (self.input_stack[i], self.target_stack[i])
+        if random.random() > .5:
+            return self.input_stack[i].to(device=self.device), self.target_stack[i].to(device=self.device)
+
+        # Returns mùirror image half the time
+        return torch.flip(self.input_stack[i].to(device=self.device), (-1,)), \
+            torch.flip(self.target_stack[i].to(device=self.device), (-1,))
 
     @property
     def num_labels(self):
@@ -354,21 +351,23 @@ class ImageDataset(Dataset):
 
 class MultiOrbitDataset(Dataset):
 
-    def __init__(self, input_paths, target_paths, which_orbit='rand', **kwargs):
+    def __init__(self, input_paths, target_paths, which_orbit='rand', device=None, **kwargs):
         """Dataset for training with multiple orbits as input images corresponding to the same ground truth target image
 
         Arguments:
         ----------
             input_paths (list): [id,orbit,slc] of the training data
             target_paths (list): [id,slc] 
-            which_orbit (str/int): if int -> orbit in [1,2,3]
+            which_orbit (str/int): if int -> orbit in range(1, len(input_paths[i])+1)
         
         """
 
         super(MultiOrbitDataset, self).__init__()
 
-        self.device = kwargs.get('device', 
-                                 torch.cuda.current_device() if torch.cuda.is_available() else torch.device('cpu'))
+        if device is None:
+            self.device = torch.cuda.current_device() if torch.cuda.is_available() else torch.device('cpu')
+        else:
+            self.device = device
         self.data_augmentation = kwargs.get('data_augmentation', True)
 
         # Adds channel dim if needed to have dims: [id,channel,slice]
@@ -396,8 +395,12 @@ class MultiOrbitDataset(Dataset):
         # Imports input image from a random or chosen orbit height  
         input_stacks, target_stacks = \
             (self.input_stacks[random.randint(0, len(self.input_stacks)-1)][i], self.target_stack[i]) \
-            if self.which_orbit == -1 \
-            else (self.input_stacks[self.which_orbit-1][i], self.target_stack[i])
-        
-        return input_stacks.to(device=self.device), target_stacks.to(device=self.device)
+            if self.which_orbit == -1 else (self.input_stacks[self.which_orbit-1][i], self.target_stack[i])
+
+        # returns mirror image from [np.pi, 2*np.pi[ radial sampling half the time
+        if random.random() > .5:
+            return input_stacks.to(device=self.device), target_stacks.to(device=self.device)
+
+        return torch.flip(input_stacks.to(device=self.device), (-1,)), \
+            torch.flip(target_stacks.to(device=self.device), (-1,))
 

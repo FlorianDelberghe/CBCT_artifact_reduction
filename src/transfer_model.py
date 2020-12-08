@@ -16,6 +16,19 @@ def fine_tune(model, dataloaders, epochs=10, **kwargs):
     pass
 
 
+def shuffle_weights(model):
+    """Channel-wise shuffling of a models weights"""
+    
+    with torch.no_grad():
+        for p in model.parameters():
+            # Filter out biases and final layer
+            if len(p.size()) < 4: continue
+            
+            for c in range(p.size(1)):
+                rand_idx = torch.tensor(random.sample(range(p[:,c].numel()), p[:,c].numel()))
+                p.data[:,c] = p.data[:,c].flatten()[rand_idx].view(p[:,c].size())
+
+
 def transfer(model, dataloaders, epochs=10, **kwargs):
 
     train_dl, val_dl = dataloaders
@@ -29,9 +42,10 @@ def transfer(model, dataloaders, epochs=10, **kwargs):
     
     plt_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
     
+    max_batch = 500
     current_batch = 0
     for e in range(epochs):
-        if current_batch > 1e3: break
+        if current_batch > max_batch: break
 
         for i, (input_, target) in enumerate(train_dl):
             current_batch = i + e*len(train_dl)
@@ -58,10 +72,12 @@ def transfer(model, dataloaders, epochs=10, **kwargs):
                 ax.set_xlabel('batch')
                 ax.set_xticks(np.linspace(0, len(val_losses), 13).astype('int16'))
                 ax.set_ylabel('MSE Loss')
-                ax.set_ylim([1e-6,None])
+                ax.set_ylim([1e-6,2e-3])
                 ax.yaxis.grid()
-                plt.savefig('outputs/transfer_loss_W_d80.png', bbox_inches='tight')
+                plt.savefig(kwargs.get('filename', 'outputs/transfer_loss.png'), bbox_inches='tight')
                 plt.close(fig)
 
-            if current_batch > 500: break
+            if current_batch > max_batch: break
+
+    print('')
         

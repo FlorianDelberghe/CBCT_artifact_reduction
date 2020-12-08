@@ -26,7 +26,7 @@ learning task.
 
 
 ## Structure:
-
+**TODO: Structure has changed**
 ```
 test: main file to run experiments from  
 

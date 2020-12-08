@@ -1,6 +1,7 @@
 import glob
 import os
 import pathlib
+from pickle import NONE
 import random
 import sys
 import time
@@ -33,7 +34,7 @@ def test(model, dataloader):
     return metrics.mean(axis=1), metrics.std(axis=1)
 
 
-def noise_robustness(model, dataset, noise='gaussian', **kwargs):
+def noise_robustness(model, dataloader, noise='gaussian', **kwargs):
     
     if noise.lower() == 'gaussian':
         noise_range = kwargs.get('noise_range', np.linspace(0, .05, 20, ))
@@ -43,33 +44,37 @@ def noise_robustness(model, dataset, noise='gaussian', **kwargs):
         add_noise = shot_noise
     else:
         raise ValueError(f"Wrong noise argument: '{noise}'")
-    
-    te_dl = DataLoader(dataset, batch_size=1, sampler=ValSampler(len(dataset), 100))
 
     metrics = np.empty((3, len(noise_range)))
     with evaluate(model):
         for j in range(len(noise_range)):
-            metrics_ = np.empty((3, len(te_dl)))
-            for i, (input_, target) in enumerate(te_dl):
+            metrics_ = np.empty((3, len(dataloader)))
+            for i, (input_, target) in enumerate(dataloader):
 
-                input_ = add_noise(input_, noise_range[j])
+                input_ = add_noise(input_, std=noise_range[j])
                 pred = model(input_)
 
                 metrics_[:,i] = mse(pred, target), ssim(pred, target), dsc(pred, target)             
 
             metrics[:,j] = metrics_.mean(axis=1)
 
-    fig, ax = plt.subplots()
-    ax.plot(noise_range, metrics[1], label='DSC', color=plt.rcParams['axes.prop_cycle'].by_key()['color'][1])
-    ax.plot(noise_range, metrics[2], label='SSIM', color=plt.rcParams['axes.prop_cycle'].by_key()['color'][2])
+    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
+    fig, ax = plt.subplots(figsize=(10,10))
     ax2 = ax.twinx()
-    ax2.plot(noise_range, metrics[0], label='MSE', color=plt.rcParams['axes.prop_cycle'].by_key()['color'][0])
 
-    ax.legend(loc='upper right'); ax2.legend(loc='upper right')
+    line1 = ax.plot(noise_range, metrics[0], c=colors[0])
+    line2 = ax2.plot(noise_range, metrics[1], c=colors[1])
+    line3 = ax2.plot(noise_range, metrics[2], c=colors[2])
+
+    plt.legend(line1+line2+line3, ('MSE', 'SSIM', 'DSC'), loc='upper right')
+    ax.set_xlabel('Noise range')
+    ax.set_ylabel('Loss')
+    ax2.set_ylabel('Similarity Metrics')
     ax.set_ylim([0, None])
-    ax2.set_ylim([0, None])
-    # ax2.set_ylim([0, 1.1*metrics[0].max()])
+    ax2.set_ylim([0, 1])
+    ax2.yaxis.grid()
+    ax.set_title(kwargs.get('title', None))
     plt.savefig('outputs/noise_robustness.png')
     plt.close(fig)
 
@@ -123,7 +128,7 @@ def plot_metrics_evolution(model, state_dicts, dataset, title=None,
     fig, ax = plt.subplots(figsize=(10,10))
     ax2 = ax.twinx()
 
-    xticks = np.arange(metrics.shape[1])
+    xticks = np.arange(metrics.shape[1])+1
     line1 = ax.plot(xticks, metrics[0].mean(1), c=colors[0])
     line2 = ax2.plot(xticks, metrics[1].mean(1), c=colors[1])
     line3 = ax2.plot(xticks, metrics[2].mean(1), c=colors[2])
@@ -159,8 +164,8 @@ def pred_test_sample(model, dataset, filename='outputs/sample_pred.png'):
 
 
 # ===== Noise Functions ===== #
-def add_noise(x, which='gaussian'):
-    pass
+# def add_noise(x, which='gaussian'):
+#     pass
 
 
 def gauss_noise(x, mean=0, std=.1):

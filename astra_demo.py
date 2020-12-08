@@ -55,7 +55,7 @@ def test_astra_sim():
 
     utils.save_vid('outputs/agd_proj.avi', projections[...,None] /projections.max())
     reconstruction = astra_sim.FDK_reconstruction(projections, scanner_params, proj_vecs=vecs, gpu_id=GPU_ID, rec_shape=(501,501,501))
-    reconstruction = (np.transpose(reconstruction, (0,2,1)) -reconstruction.min()) / (reconstruction.max() -reconstruction.min())
+    reconstruction = (reconstruction -reconstruction.min()) / (reconstruction.max() -reconstruction.min())
     utils.save_vid(f'outputs/reconst_fdk_pos{ORBIT_ID}_sim.avi', (np.swapaxes(reconstruction[...,None], 0,1)))
     utils.save_vid(f'outputs/reconst_fdk_pos{ORBIT_ID}_sim_radial.avi', 
                    astra_sim.radial_slice_sampling(reconstruction, np.linspace(0, np.pi, 360, endpoint=False))[...,None])
@@ -73,8 +73,7 @@ def test_astra_sim():
                    astra_sim.radial_slice_sampling(reconstruction, np.linspace(0, np.pi, 360, endpoint=False))[...,None])
 
 
-def main():
-
+def main():    
     test_astra_sim()
 
 
