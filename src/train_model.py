@@ -3,10 +3,13 @@ import random
 from datetime import datetime
 
 import torch
+import numpy as np
+import matplotlib.pyplot as plt
 from torch import nn
 from tqdm import tqdm
+from pathlib import Path
 
-from .utils import evaluate, imsave, LossTracker
+from .utils import evaluate, imsave
 
 
 def TVRegularization(scaling=1, in_channels=1):
@@ -26,6 +29,61 @@ def TVRegularization(scaling=1, in_channels=1):
         return torch.norm(torch.sqrt(sobel(image).pow(2).sum(dim=1)), 1) /image.numel() *scaling
 
     return compute_TV
+
+
+class MetricsLogger():
+
+    def __init__(self, **metrics):
+        """Function gets losses to track as {'loss_name': loss_init_value,}"""
+
+        if len(metrics) == 0:
+            raise ValueError(f"{self.__class__.__name__} requires non-empty kwargs for __init__")
+
+        self.metrics = dict(
+            [(k, [(0, v)]) for k, v in metrics.items()]
+            )
+
+    def update(self, current_iter, *metrics, **named_metrics):
+        """Updates one or more of the tracked metrics"""
+
+        # Same order as __init__() in python>=3.6
+        if len(metrics) > 0:
+            for key, metric in zip(self.metrics.keys(), metrics):
+                self.metrics[key].append((current_iter, metric))
+            
+        # Random order with names
+        elif len(named_metrics) > 0:
+            for name, metric in named_metrics.item():
+                self.metrics[name].append((metric))
+
+        else:
+            raise ValueError("No valid value to update losses")
+
+    def plot(self, **kwargs):
+        plt.figure(figsize=(10,10))
+        
+        for key, metric in self.metrics.items():
+            iters, metric = tuple(zip(*metric))
+            plt.plot(iters, metric, label=key)
+
+        plt.xlabel(kwargs.get('xlabel', 'Batch'))
+        plt.xticks(kwargs.get('xticks', 
+                              np.linspace(0, max(iters), min(9, len(iters))).astype('int16')))
+        plt.grid(axis='x')
+        plt.ylabel(kwargs.get('ylabel', 'Loss'))
+        plt.ylim(kwargs.get('ylim', [0,5e-4]))
+        plt.title(kwargs.get('title', ''))
+        plt.legend()
+        plt.savefig(kwargs.get('filename', 'outputs/training_losses.png'))
+
+    def save(self, filename):        
+        with Path(filename).open('wt') as f:
+            for name, iter_metric in self.metrics.items():
+                f.write(str(name) +' \n')
+
+                iters, metric = tuple(zip(*iter_metric))
+                f.write(','.join(list(map(str, iters))) +' \n')
+                f.write(','.join(list(map(lambda m: f'{m:.7f}', metric))) +' \n')
 
 
 def train(model, dataloaders, loss_criterion, epochs, regularization=None, **kwargs):
@@ -54,7 +112,7 @@ def train(model, dataloaders, loss_criterion, epochs, regularization=None, **kwa
     train_dl, val_dl = dataloaders
 
     optimizer = torch.optim.Adam(model.msd.parameters(), lr=kwargs.get('lr', 1e-3))
-    gamma = 1e-2 **(1/(epochs-10))
+    gamma = 1e-3 **(1/(epochs-10))
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
 
     # Evaluate starting state of model
@@ -63,7 +121,7 @@ def train(model, dataloaders, loss_criterion, epochs, regularization=None, **kwa
     best_state, best_epoch = model.msd.state_dict().copy(), 0
     
     # Creates func to save sample of the models predictions and losses
-    loss_tracker = LossTracker(training_error=best_val, validation_error=best_val)
+    loss_tracker = MetricsLogger(training_loss=best_val, validation_loss=best_val)
     save_val = save_val_sample_pred(val_dl)
     save_val(model, 'outputs/val_ims_e0.png')
 
@@ -109,6 +167,7 @@ def train(model, dataloaders, loss_criterion, epochs, regularization=None, **kwa
         save_val(model, f'outputs/val_ims_e{e+1}.png')
         torch.save(model.msd.state_dict(), f"{save_folder}/model_epoch{e+1}.h5")
 
+    loss_tracker.save(f"{save_folder}/losses.txt")
     torch.save(best_state, f"{save_folder}/best_model_{best_epoch}.h5")
 
 

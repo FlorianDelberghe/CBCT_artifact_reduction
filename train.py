@@ -18,14 +18,17 @@ import src.models as models
 
 
 def train_model():    
-    target_ims, input_ims = utils.load_walnut_ds()
+    target_ims, input_ims = utils.load_phantom_ds()
     test_set, val_set, train_set = utils.split_data(input_ims, target_ims)
 
     model_params = {'c_in': 1, 'c_out': 1, 'depth': 30, 'width': 1,
                         'dilations': [1,2,4,8,16], 'loss': 'L2'}
     model = MSDRegressionModel(**model_params)
     # model.msd.load_state_dict(
-    #     torch.load(sorted(glob.glob('model_weights/MSD_d30_Walnuts_scratch_1120175735/best*.h5'), key=_nat_sort)[-1]))
+    #     torch.load(sorted(glob.glob('model_weights/MSD_d30_fW_1127195514/model*.h5'), key=_nat_sort)[-1]))
+
+    # from src.transfer_model import shuffle_weights
+    # shuffle_weights(model.msd)
 
     batch_size = 32
     train_ds = MultiOrbitDataset(*train_set, device='cuda')
@@ -38,7 +41,7 @@ def train_model():
         kwargs['save_folder'] = f"model_weights/{MODEL_NAME}_{datetime.now().strftime('%m%d%H%M%S')}"
 
     model.set_normalization(DataLoader(train_ds, batch_size=100, sampler=ValSampler(len(train_ds), min(len(train_ds), 5000))))
-    train(model, (train_dl, val_dl), nn.MSELoss(), 20, lr=2e-3, **kwargs)
+    train(model, (train_dl, val_dl), nn.MSELoss(), 100, lr=2e-3, **kwargs)
 
 
 def main():
