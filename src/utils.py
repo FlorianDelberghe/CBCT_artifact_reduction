@@ -7,19 +7,18 @@ from contextlib import contextmanager
 from pathlib import PurePath ,Path
 
 import imageio
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from cv2 import COLOR_GRAY2RGB, VideoWriter, VideoWriter_fourcc, cvtColor
 
 
-def flip_trans(image):
-    """Re-orients projections correctly"""
-    return np.transpose(np.flipud(image))
-
-
 def load_projections(walnut_path, orbit_id, angular_sub_sampling=1):
     """Loads all CB projections from one walnut/orbit pair with associated info for reconstruction"""
+
+    def flip_trans(image):
+        """Re-orients projections correctly"""
+        return np.transpose(np.flipud(image))
+
 
     print(f"Loading: {walnut_path}...")
 
@@ -207,15 +206,20 @@ def load_phantom_ds(folder_path='PhantomsRadial/'):
     return phantom_truth_paths, phantom_fdk_paths
 
 
-def load_transposed_phatom_ds():
-    return load_phantom_ds('PhantomsTransposedRadial/')
+def set_seed(func):
+    """Decorator to set random seed before function calls for deterministic behavior"""
 
-
-def split_data(input_ims, target_ims, frac=7/42, seed=0):
-
-    n_test = n_val = int(np.round(len(input_ims) *frac))
+    def _set_seed_wrapper(*args, seed=0, **kwargs):
+        random.seed(seed)
+        return func(*args, **kwargs)
     
-    random.seed(seed)
+    return _set_seed_wrapper
+
+@set_seed
+def split_data(input_ims, target_ims, frac=7/42):
+
+    n_test = n_val = max(1, int(np.round(len(target_ims) *frac)))
+    
     zipped_ims = random.sample([
         (i, input_im, target_im) for i, (input_im, target_im) in enumerate(zip(input_ims, target_ims))
     ], len(target_ims))
@@ -227,6 +231,43 @@ def split_data(input_ims, target_ims, frac=7/42, seed=0):
     print(f"Sample indices for test: {ids_te}, validation: {ids_val}, training: {ids_tr}")
 
     return test_set, val_set, train_set
+
+@set_seed
+def split_data_CV(input_ims, target_ims, frac=1/4):
+    
+    if isinstance(frac, (tuple, list)):
+        n_test = int(np.round(len(target_ims) *frac[0]))
+        # n_val = max(1, int(np.round(len(target_ims) *frac)))
+        n_val = int(np.round(len(target_ims) *frac[1]))
+
+    else:
+        n_test = n_val = max(1, int(np.round(len(target_ims) *frac)))
+
+    zipped_ims = random.sample([
+        (i, input_im, target_im) for i, (input_im, target_im) in enumerate(zip(input_ims, target_ims))
+    ], len(target_ims))
+
+    if n_test <= 0:
+        ids_te, test_set = None, None
+    else:
+        ids_te, *test_set = tuple(zip(*zipped_ims[:n_test]))
+        zipped_ims = zipped_ims[n_test:]
+
+    for i in range(len(zipped_ims)):
+        if n_val == 0:
+            ids_val, val_set = None, None
+            ids_tr, *train_set = tuple(zip(*zipped_ims))
+        
+        else:
+            val_idx = set([(j+i) %len(zipped_ims) for j in range(n_val)])
+            tr_idx = set(range(len(zipped_ims))) -val_idx
+
+            ids_val, *val_set = tuple(zip(*[zipped_ims[j] for j in val_idx]))
+            ids_tr, *train_set = tuple(zip(*[zipped_ims[j] for j in tr_idx]))
+
+        print(f"Sample indices for test: {ids_te}, validation: {ids_val}, training: {ids_tr}")
+
+        yield test_set, val_set, train_set
 
 
 class ValSampler(torch.utils.data.Sampler):
@@ -255,51 +296,5 @@ class BatchSampler(torch.utils.data.Sampler):
     def __init__(self, dataset, sub_sampling):
         raise NotImplementedError
 
-
-class LossTracker():
-
-    def __init__(self, starting_iter=0, **kwargs):
-        """Function gets losses to track as {'loss_name': loss_init_value,}"""
-        self.iters = [starting_iter]
-        self.losses = dict(
-            ((k, v) if isinstance(v, list) else (k, [v]) for k, v in kwargs.items())
-            )
-
-    def update(self, current_iter, *losses, **named_losses):
-        # Same order as __init__()
-        if len(losses) > 0:
-            self.iters.append(current_iter)
-            for key, loss in zip(self.losses, losses):
-                self.losses[key].append(loss)
-            # One method or the other
-            return
-
-        # Random order
-        if len(named_losses) > 0:
-            self.iters.append(current_iter)
-            for name, loss in named_losses.item():
-                self.losses[name].append(loss)
-            return
-        
-        raise ValueError("No valid value to update losses")
-
-    def plot(self, **kwargs):
-        plt.figure(figsize=(10,10))
-
-        for key, loss in self.losses.items():
-            if len(self.iters) == len(loss):
-                plt.plot(self.iters, loss, label=key)
-            else:
-                plt.plot(np.arange(len(loss)), loss, label=key)
-
-        plt.xlabel(kwargs.get('xlabel', 'Batch'))
-        plt.xticks(kwargs.get('xticks', 
-                              np.linspace(0, self.iters[-1], min(13, len(self.iters))).astype('int16')))
-        plt.grid(axis='x')
-        plt.ylabel(kwargs.get('ylabel', 'Loss'))
-        plt.ylim([0,5e-4])
-        plt.title(kwargs.get('title', ''))
-        plt.legend()
-        plt.savefig(kwargs.get('filename', 'outputs/training_losses.png'))
 
 

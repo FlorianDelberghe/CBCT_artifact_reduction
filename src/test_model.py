@@ -1,11 +1,10 @@
 import glob
 import os
-import pathlib
-from pickle import NONE
 import random
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -17,7 +16,6 @@ from torch.utils.data import DataLoader
 
 from . import utils
 from .image_dataset import ImageDataset
-from .unet_regr_model import UNetRegressionModel
 from .utils import ValSampler, evaluate, imsave
 
 
@@ -101,6 +99,7 @@ def compare_models(models, dataloader, names=None, title=None):
         axes[i].set_xticklabels(names)
         axes[i].set_title(metric_names[i])
 
+    axes[0].set_ylim([0,None])
     plt.suptitle(title)
     plt.savefig('outputs/model_comparison.png')
 
@@ -109,16 +108,22 @@ def plot_metrics_evolution(model, state_dicts, dataset, title=None,
                            filename='outputs/metrics_evolution.png'):
 
     n_samples = 100
-    metrics = np.zeros((3, len(state_dicts), n_samples))
+    metrics = np.zeros((3, len(state_dicts)+1, n_samples))
+
     # Loading the state_dicts from files
-    if isinstance(state_dicts[0], (str, pathlib.Path)):
+    if isinstance(state_dicts[0], (str, Path)):
         state_dicts = (torch.load(state_dict) for state_dict in state_dicts)
+
     te_dl = DataLoader(dataset, batch_size=1, sampler=ValSampler(len(dataset), n_samples=n_samples))
 
     with evaluate(model):
+        metrics[:,0,:] = np.array(
+                [[mse(model(input_), target), ssim(model(input_), target), dsc(model(input_), target)]
+                 for input_, target in te_dl]).T
+
         for i, state_dict in enumerate(state_dicts):
             model.msd.load_state_dict(state_dict)
-            metrics[:,i,:] = np.array(
+            metrics[:,i+1,:] = np.array(
                 [[mse(model(input_), target), ssim(model(input_), target), dsc(model(input_), target)]
                  for input_, target in te_dl]).T
 
@@ -128,7 +133,7 @@ def plot_metrics_evolution(model, state_dicts, dataset, title=None,
     fig, ax = plt.subplots(figsize=(10,10))
     ax2 = ax.twinx()
 
-    xticks = np.arange(metrics.shape[1])+1
+    xticks = np.arange(metrics.shape[1])
     line1 = ax.plot(xticks, metrics[0].mean(1), c=colors[0])
     line2 = ax2.plot(xticks, metrics[1].mean(1), c=colors[1])
     line3 = ax2.plot(xticks, metrics[2].mean(1), c=colors[2])
@@ -149,7 +154,38 @@ def plot_metrics_evolution(model, state_dicts, dataset, title=None,
     ax2.set_yticks(np.linspace(0,1,11))
     ax2.yaxis.grid()
     ax.set_title(title)
-    plt.savefig(filename)
+    plt.savefig( )
+
+
+def compare_loss(*folders, names=None):
+
+    # loss_files = [next(Path(folder).glob('losses.txt') ) for folder in folders]
+    loss_files = [next(folder.glob('losses.txt') ) for folder in folders]
+
+    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    plt.figure(figsize=(15,15))
+
+    for i, loss_file in enumerate(loss_files):
+
+        with loss_file.open('rt') as f:
+            for j, line in enumerate(f):
+
+                loss_name = line.strip()
+                iters = list(map(int, next(f).strip().split(',')))
+                loss = list(map(float, next(f).strip().split(',')))
+
+                plt.plot(iters, loss, color=colors[i], label=loss_name, linestyle=['dashed', None][j%2])
+
+    lines = plt.gca().get_lines()
+    if names is None:
+        plt.legend(lines[:2], ['traihing loss', 'validation loss'])
+    else:
+        plt.legend(lines[:2] + lines[1::2], ['traihing loss', 'validation loss'] + names)
+
+    plt.xlabel('Batch')
+    plt.ylim([0,9e-4])
+    plt.ylabel('Loss')
+    plt.savefig('outputs/loss.png')
             
 
 def pred_test_sample(model, dataset, filename='outputs/sample_pred.png'):
@@ -161,6 +197,10 @@ def pred_test_sample(model, dataset, filename='outputs/sample_pred.png'):
                             for sample, truth in te_dl], dim=-1)
 
     imsave(filename, preds.cpu().squeeze().numpy())
+
+
+def SVCCA_analysis(neurons, inputs):
+    pass
 
 
 # ===== Noise Functions ===== #
@@ -217,28 +257,37 @@ def compute_metric(pred, target, metric='MSE'):
 
 def mse(x, y):
     """MSE loss x: image, y: target_image"""
+
+    def _mse(x, y): return ((x-y) **2).mean()
+
     if isinstance(x, torch.Tensor):
         with torch.no_grad(): 
-            return ((x-y) **2).mean().item()
+            return _mse(x, y).item()
 
-    return ((x-y) **2).mean()
+    return _mse(x, y)
 
 def rmse(x, y):
     return np.sqrt(mse(x, y))
 
 def norm_mse(x, y):
+
     # normalize wrt to target image
-    d_range = y.max() - y.min()
+    def _norm_mse(x, y): return (((x-y) /(y.max()-y.min())) **2).mean()
+
     if isinstance(x, torch.Tensor):
         with torch.no_grad(): 
-            return (((x-y) /d_range) **2).mean().item()
+            return _norm_mse(x, y).item()
 
-    return (((x-y) /d_range)**2).mean()
+    return _norm_mse(x, y)
 
 def dsc(x, y, n_classes=3):
-
+    
     def otsu(image, n_classes):
-        thresholds = threshold_multiotsu(image, classes=n_classes)
+        try:
+            thresholds = threshold_multiotsu(image, classes=n_classes)
+        except ValueError:
+            # When output is constant can't apply otsu thresholding
+            thresholds = np.ones(1)
 
         return np.digitize(image, bins=thresholds).astype('uint8')        
     

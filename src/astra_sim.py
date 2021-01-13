@@ -7,33 +7,56 @@ from . import nesterov_gradient
 from .utils import timeit
 
 
-class FleX_ray_scanner():
-    """Class for storage of the CBCT scanners intrinsic parameters, sizes in mm"""
-
-    def __init__(self, name='FleX_ray_scanner',
-                 detector_size=(1944, 1536),
-                 pixel_size=74.8e-3,
-                 bin_factor=2,
-                 source_origin_dist=66,
-                 source_detector_dist=199):
-
+class CTScanner():
+    def __init__(self, name,
+                 detector_size, pixel_size, bin_factor, source_origin_dist, source_detector_dist, **kwargs):
 
         self.name = name
-        # (n_rows, n_cols)
-        self.detector_size = detector_size
-        # Isotropic pixels
-        self.pixel_size = pixel_size
+
+        # (rows, cols)
+        self.detector_size = detector_size        
+        self.pixel_size = pixel_size if isinstance(pixel_size, tuple) else (pixel_size,) *2
 
         self.bin_factor = int(bin_factor)
-        self.detector_binned_size = tuple(map(lambda x: int(x/bin_factor), self.detector_size))
-        self.pixel_binned_size = bin_factor * self.pixel_size
+        self.detector_effective_size = tuple(map(lambda x: int(x /bin_factor), self.detector_size))
+        self.pixel_effective_size = tuple(map(lambda x: int(x /bin_factor), self.pixel_size))
 
         self.source_origin_dist = source_origin_dist
         self.source_detector_dist = source_detector_dist
         self.origin_detector_dist = self.source_detector_dist - self.source_origin_dist
 
+class FleX_ray_scanner(CTScanner):
+    """Class for storage of the CBCT scanners intrinsic parameters, sizes in mm"""
+
+    def __init__(self, name=None,
+                 detector_size=(1944, 1536),
+                 pixel_size=74.8e-3,
+                 bin_factor=2,
+                 source_origin_dist=66,
+                 source_detector_dist=199,
+                 **kwargs):
+
+        if name is None: name = self.__class__.__name__
+        super().__init__(name, detector_size, pixel_size, bin_factor, source_origin_dist, source_detector_dist, **kwargs)
 
         self.FoV = tuple(map(lambda x: x * self.pixel_size, self.detector_size))
+
+class SiemensCT(CTScanner):
+    """Siemens CT scanner from LDCT dataset"""
+
+    def __init__(self, name=None,
+                 detector_size=(64, 736),
+                 pixel_size=(1.0947, 1.2858),
+                 bin_factor=1,
+                 source_origin_dist=595,
+                 source_detector_dist=1085,
+                 **kwargs):
+
+        if name is None: name = self.__class__.__name__
+        super().__init__(name, detector_size, pixel_size, bin_factor, source_origin_dist, source_detector_dist, **kwargs)
+
+        self.FoV = 500
+
 
 
 def rotate_astra_vec_geom(vecs, theta):
@@ -73,13 +96,13 @@ def create_scan_geometry(scan_params, n_projs, elevation=0):
                   for theta in scan_angles])
    
     # col pixel spacing vector
-    u = np.array([(scan_params.pixel_binned_size * np.cos(theta),
-                   scan_params.pixel_binned_size * np.sin(theta),
+    u = np.array([(scan_params.pixel_effective_size * np.cos(theta),
+                   scan_params.pixel_effective_size * np.sin(theta),
                    0)
                   for theta in scan_angles])
 
     # row pixel spacing vector
-    v = np.array([(0, 0, scan_params.pixel_binned_size) for _ in scan_angles])
+    v = np.array([(0, 0, scan_params.pixel_effective_size) for _ in scan_angles])
 
     return np.concatenate((src, d, u, v), axis=1).astype('float32')
 
@@ -112,7 +135,7 @@ def create_CB_projection(ct_volume, scanner_params, proj_vecs, voxel_size=.1, **
     # [z,x,y] axis order for volume data
     proj_id = astra.data3d.create('-vol', vol_geom, data=ct_volume)    
     proj_geom = astra.create_proj_geom('cone_vec', 
-                                       *scanner_params.detector_binned_size, 
+                                       *scanner_params.detector_effective_size, 
                                        proj_vecs)
 
     projections_id, projections = astra.creators.create_sino3d_gpu(
@@ -125,7 +148,7 @@ def create_CB_projection(ct_volume, scanner_params, proj_vecs, voxel_size=.1, **
 
 
 @timeit
-def FDK_reconstruction(projections, scanner_params, proj_vecs, voxel_size=.1, rec_shape=501, **kwargs):
+def FDK_reconstruction(projections, scanner_params, proj_vecs, voxel_size=.1, rec_shape=501, vol_center=0, **kwargs):
     """Uses FDK method to reconstruct CT volume from CB projections
         
         Args:
@@ -148,13 +171,15 @@ def FDK_reconstruction(projections, scanner_params, proj_vecs, voxel_size=.1, re
 
     # from [proj_slc,rows,cols] to [rows,proj_slc,cols]
     projections = np.transpose(projections, (1,0,2))
-    proj_geom = astra.create_proj_geom('cone_vec', *scanner_params.detector_binned_size, proj_vecs)    
+    proj_geom = astra.create_proj_geom('cone_vec', *scanner_params.detector_effective_size, proj_vecs)    
     projections_id = astra.data3d.create('-sino', proj_geom, projections)
 
     # [z,x,y] to [y,x,z] axis transposition
+    vol_center = tuple([vol_center[i] for i in [2,1,0]]) if isinstance(vol_center, tuple) else (vol_center,) *3
     reconstructed_shape = tuple([rec_shape[i] for i in [2,1,0]]) if isinstance(rec_shape, tuple) else (rec_shape,) *3
+    
     vol_geom = astra.creators.create_vol_geom(*reconstructed_shape,
-        *[sign*size/2*voxel_size for size in reconstructed_shape for sign in [-1, 1]]
+        *[center+sign*size/2*voxel_size for center, size in zip(vol_center, reconstructed_shape) for sign in [-1, 1]]
     )
     reconstruction_id = astra.data3d.create('-vol', vol_geom, data=0)
 
@@ -199,7 +224,7 @@ def AGD_reconstruction(projections, scanner_params, proj_vecs, voxel_size=.1, re
     # from [proj_slc,rows,cols] to [rows,proj_slc,cols]
     projections = np.transpose(projections, (1,0,2))
     # Gets scanning geometry from vec param
-    proj_geom = astra.create_proj_geom('cone_vec', *scanner_params.detector_binned_size, proj_vecs)    
+    proj_geom = astra.create_proj_geom('cone_vec', *scanner_params.detector_effective_size, proj_vecs)    
     projections_id = astra.data3d.create('-sino', proj_geom, projections)
 
     # [z,x,y] to [y,x,z] axis transposition

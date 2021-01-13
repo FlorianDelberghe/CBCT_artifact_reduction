@@ -165,7 +165,7 @@ class UNetRegressionModel(MSDModel):
         std = np.sqrt(square - mean ** 2)
 
         # The input data should be roughly normally distributed after
-        # passing through net_fixed.
+        # passing through net_fixed. 
         self.scale_in.bias.data.fill_(- mean / std)
         self.scale_in.weight.data.fill_(1 / std)
 
@@ -176,9 +176,30 @@ class UNetRegressionModel(MSDModel):
         self.target = Variable(target)
 
 
+class ResMSDModel(MSDModel):
+
+    def __init__(self, c_in=1, c_out=1, depth=30, width=1, dilations=[1,2,4,8,16], **kwargs):
+        super(ResMSDModel, self).__init__(c_in, c_out, depth, width, dilations)
+
+        self.net = nn.Sequential(self.scale_in, self.msd, self.scale_out)
+        self.net.to(device='cuda')
+
+    def __call__(self, input_):
+        return self.forward(input_)
+
+    def forward(self, input_):
+        return input_ + self.net(input_)
+
+    def train(self):
+        self.msd.train()
+
+    def eval(self):
+        self.msd.eval()
+
+
 class RecMSDModel(MSDModel):
 
-    def __init__(self, c_in=1, c_out=1, depth=10, width=2, n_recs=5, dilations=[1,2,4,8,16]):
+    def __init__(self, c_in=1, c_out=1, depth=10, width=2, n_recs=5, dilations=[1,2,4,8,16], **kwargs):
         super(RecMSDModel, self).__init__(c_in, c_out, depth, width, dilations)
 
         assert c_in == c_out, f"in and out channels must be the same for RecMSD, are '{c_in}' and '{c_out}'"

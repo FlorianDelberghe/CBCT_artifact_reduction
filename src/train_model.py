@@ -112,7 +112,7 @@ def train(model, dataloaders, loss_criterion, epochs, regularization=None, **kwa
     train_dl, val_dl = dataloaders
 
     optimizer = torch.optim.Adam(model.msd.parameters(), lr=kwargs.get('lr', 1e-3))
-    gamma = 1e-3 **(1/(epochs-10))
+    gamma = 1e-2 **(1/(epochs-10))
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
 
     # Evaluate starting state of model

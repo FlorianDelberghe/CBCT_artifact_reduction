@@ -4,6 +4,7 @@ import os
 import random
 import sys
 from datetime import datetime
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -14,8 +15,7 @@ from torch.utils.data import DataLoader
 
 import src.utils as utils
 from src.image_dataset import MultiOrbitDataset
-from src.transfer_model import transfer, shuffle_weights
-from src.unet_regr_model import UNetRegressionModel
+from src.transfer_model import transfer, shuffle_weights, plot_weights_dist
 from src.utils import ValSampler, _nat_sort, evaluate
 
 
@@ -24,7 +24,14 @@ def transfer_model():
     model_params = {'c_in': 1, 'c_out': 1, 'depth': 30, 'width': 1,
                         'dilations': [1,2,4,8,16], 'loss': 'L2'}
     model = MSDRegressionModel(**model_params)
-    # model.net.load_state_dict(torch.load('model_weights/MSD_d30_fW_e20.h5'))
+    model.net.load_state_dict(torch.load('model_weights/MSD_d30_fW_e20.h5'))
+
+    plot_weights_dist(model.msd, list(map(lambda f: torch.load(f), sorted(Path('model_weights/MSD_d30_P_scratch_LOICV_0_scratch_1215172006/').glob('model_*.h5'), key=_nat_sort))),
+                      title='std LOICV_0', filename='weight_std_scratch_LOICV0.png')
+    plot_weights_dist(model.msd, list(map(lambda f: torch.load(f), sorted(Path('model_weights/MSD_d30_P_transfer_LOICV_0_1216102129/').glob('model_*.h5'), key=_nat_sort))),
+                      title='std LOICV_0', filename='weight_std_transfer_LOICV0.png')
+
+    sys.exit()
 
     target_ims, input_ims = utils.load_phantom_ds()
     test_set, val_set, train_set = utils.split_data(input_ims, target_ims)

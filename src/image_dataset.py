@@ -331,7 +331,7 @@ class ImageDataset(Dataset):
         if random.random() > .5:
             return self.input_stack[i].to(device=self.device), self.target_stack[i].to(device=self.device)
 
-        # Returns mùirror image half the time
+        # Returns mirror image half the time
         return torch.flip(self.input_stack[i].to(device=self.device), (-1,)), \
             torch.flip(self.target_stack[i].to(device=self.device), (-1,))
 

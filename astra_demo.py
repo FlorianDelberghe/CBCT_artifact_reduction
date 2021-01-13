@@ -3,12 +3,18 @@ import glob
 import os
 import random
 import sys
+from tqdm import tqdm
+from pathlib import Path, PurePath
+from struct import iter_unpack, unpack
 
 import astra
 import foam_ct_phantom
 import matplotlib.pyplot as plt
 import numpy as np
+import pydicom
 from imageio import imread
+from pydicom import dcmread
+from scipy.interpolate import RectBivariateSpline, interp2d, griddata
 
 import src.utils as utils
 from src import astra_sim
@@ -73,15 +79,357 @@ def test_astra_sim():
                    astra_sim.radial_slice_sampling(reconstruction, np.linspace(0, np.pi, 360, endpoint=False))[...,None])
 
 
+def validate_CB_simulation():
+
+    from src.test_model import compute_metric    
+    scanner_params = astra_sim.FleX_ray_scanner()
+
+    flip_trans = lambda im: np.transpose(np.flipud(im))
+    angular_sub_sampling = 1
+    
+    ids = [9, 13, 16, 19]
+
+    x_ticks = np.arange(len(ids))
+    x_ticks_labels = list(map(str, ids))
+    bar_width = .1
+
+    fig, axes = plt.subplots(3, figsize=(10,10))
+    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+
+    for j, walnut_id in enumerate(ids):
+        walnut_path = Path(DATA_PATH) /f'Walnuts/Walnut{walnut_id}'
+
+        projections, vecs = [None for _ in range(3)], [None for _ in range(3)]
+
+        for i, orbit_id in enumerate([1,2,3]):
+
+            proj_files = sorted(glob.glob(os.path.join(walnut_path, 'Projections', f'tubeV{orbit_id}', 'scan_*.tif')))  
+            flat_files = sorted(glob.glob(os.path.join(walnut_path, 'Projections', f'tubeV{orbit_id}', 'io*.tif')))
+            dark_file = os.path.join(walnut_path, 'Projections', f'tubeV{orbit_id}', 'di000000.tif')
+            vec_file = os.path.join(walnut_path, 'Projections', f'tubeV{orbit_id}', 'scan_geom_corrected.geom')
+
+            projections[i] = np.stack([flip_trans(imread(file)) for file in proj_files], axis=0)
+
+            dark_field = flip_trans(imread(dark_file))
+            flat_field = np.mean(np.stack([flip_trans(imread(file)) for file in flat_files], axis=0), axis=0)
+
+            # first and last are projections under the same angle
+            projs_idx = range(0, 1200, angular_sub_sampling)
+            vecs[i] = np.loadtxt(vec_file)
+
+            # Projections acquired in reverse order of vecs
+            projections[i] = projections[i][projs_idx][::-1]
+            vecs[i] = vecs[i][projs_idx]
+
+            projections[i] = (projections[i] - dark_field) / (flat_field - dark_field)
+            projections[i] = -np.log(projections[i])
+            projections[i] = np.ascontiguousarray(projections[i])
+
+        agd_volume = np.stack([imread(file) for file in sorted(walnut_path.glob(f'Reconstructions/fdk_pos{ORBIT_ID}_*.tiff'), key=utils._nat_sort)], axis=0)
+        sim_projections = [astra_sim.create_CB_projection(agd_volume, scanner_params, proj_vecs=vecs[i], gpu_id=GPU_ID) for i in range(3)]
+
+        # reconstruction = [astra_sim.FDK_reconstruction(sim_projections[i], scanner_params, vecs[i]) for i in range(3)]
+
+        projections = [projections[i][::10] for i in range(3)]
+        sim_projections = [sim_projections[i][::10] for i in range(3)]
+
+        for i, metric in enumerate(['MSE', 'SSIM', 'DSC']):
+        
+            intra_true_metric = compute_metric(projections[0], projections[2], metric=metric)
+            intra_sim_metric = compute_metric(sim_projections[0], sim_projections[2], metric=metric)
+            inter_metric = [compute_metric(projections[i], sim_projections[i], metric=metric) for i in range(3)]
+
+            axes[i].bar(x_ticks[j] -2*bar_width, intra_true_metric, width=bar_width, color=colors[0])
+            axes[i].bar(x_ticks[j] +2*bar_width, intra_sim_metric, width=bar_width, color=colors[4])
+
+            for k in range(3):
+                axes[i].bar(x_ticks[j] +(k-1)*bar_width, inter_metric[k], width=bar_width, color=colors[k+1])
+
+            if j == 0: axes[i].set_title(metric)
+
+    for i in range(3):
+        axes[i].set_xticks(x_ticks)
+        axes[i].set_xticklabels(x_ticks_labels)
+        axes[i].set_xlim([x_ticks[0]-.5, x_ticks[-1]+.5])
+
+    plt.savefig('outputs/sim_err.png')
+
+class DicomStack():
+
+    def __init__(self, filenames):
+        self.filenames = filenames
+
+    def __len__(self):
+        return len(self.filenames)
+
+    def __getitem__(self, slc):
+        if isinstance(slc, slice):
+            return (dcmread(self.filenames[i]) for i in range(slc.start, slc.stop, slc.step))
+
+        return dcmread(self.filenames[slc])
+
+    def __iter__(self):
+        return (self[i] for i in range(len(self)))
+
+    def metadata_iterator(self):
+        return (pydicom.filereader.read_file_meta_info(filename) for filename in self.filenames)
+
+
+class DicomReader():
+
+    def __init__(self, serie_path):
+        self.serie_path = self._init_serie_path(serie_path)
+        self.slice_paths = sorted(list(self.serie_path.glob('*.dcm')))
+        self.slice_stack = DicomStack(self.slice_paths)
+
+        self.dicom_metadata_codes = {
+            'DataCollectionDiameter': (0x0018, 0x0090),
+            'ExposureTime': (0x0018, 0x1150),
+            'SpiralPitchFactor': (0x0018, 0x9311),
+            'RescaleIntercept': (0x0028,0x1052),
+            'RescaleSlope': (0x0028,0x1053),
+            'NumberofDetectorRows': (0x7029,0x1010),
+            'NumberofDetectorColumns': (0x7029,0x1011),
+            'DetectorElementTransverseSpacing': (0x7029,0x1002), # col width
+            'DetectorElementAxialSpacing': (0x7029,0x1006), # row width
+            'DetectorShape': (0x7029, 0x100B),
+            'Rows': (0x0028, 0x0010),
+            'Columns': (0x0028, 0x0011),
+            'DetectorFocalCenterAngularPosition': (0x7031, 0x1001),  # phy_0
+            'DetectorFocalCenterAxialPosition': (0x7031, 0x1002),  # z_0
+            'DetectorFocalCenterRadialDistance': (0x7031, 0x1003),  # rho_0
+            'ConstantRadialDistance': (0x7031, 0x1031),
+            'DetectorCentralElement': (0x7031, 0x1033),
+            'SourceAngularPositionShift': (0x7033, 0x100B),  # delta_phy_0
+            'SourceAxialPositionShift': (0x7033, 0x100C),  # delta_z_0
+            'SourceRadialPositionShift': (0x7033, 0x100D),  # delta_rho_0
+            'FlyingFocalSpotMode': (0x7033, 0x100E),
+            'NumberofSourceAngularSteps': (0x7033, 0x1013),
+            'TypeofProjectionData': (0x7037, 0x1009),
+            'TypeofProjectionGeometry': (0x7037, 0x100A),
+            'DarkFieldCorrectionFlag': (0x7039,0x1005),
+            'FlatFieldCorrectionFlag': (0x7039,0x1006),
+            'LogFlag': (0x7039,0x1006),
+            'WaterAttenuationCoefficient': (0x7041,0x1001),
+        }
+
+        # Gets usefull metadata from the first slice, discards pixel data
+        self.serie_metadata = self.get_metadata()
+        
+    def __len__(self):
+        return len(self.slice_stack)
+
+    def __getitem__(self, idx):
+        return self.slice_stack[idx]
+
+    def __getattr__(self, name):
+        attr = self.serie_metadata[name]
+
+        if name == 'WaterAttenuationCoefficient':
+            return float(str(attr)[2:-1])
+
+        if not isinstance(attr, bytes):
+            return attr
+
+        if len(attr) == 2:
+            return self._decode_int(attr)
+
+        if not len(attr) % 4:
+            return self._decode_float(attr, not (len(attr)//4)==1)
+
+        raise ValueError(f"Couldn't decode object: '{name}' with value '{attr}'")
+
+    @staticmethod
+    def _init_serie_path(path):        
+        path = Path(path) if isinstance(path, (str, PurePath)) else path
+
+        if isinstance(path, Path):
+            if not path.exists() or not path.is_dir():
+                raise ValueError(f"serie_path does not exist or is not a directory")
+
+            return path
+
+        else:
+            raise ValueError(f"serie_path must be path like object, is: {type(path)}")
+
+    def get_metadata(self):
+        first_slice = self.slice_stack[0]
+
+        return dict((attr_name, first_slice[tag].value) for attr_name, tag in self.dicom_metadata_codes.items())
+    
+    @staticmethod        
+    def _decode_int(value):
+        """Decodes byte object to uint16 (big-endian encoding)"""
+        return unpack('<H', value)[0]
+    
+    @staticmethod
+    def _decode_float(value, multiple_values=False):
+        """Decodes byte object to float32 (big-endian encoding)"""
+        if multiple_values:
+            return tuple(val[0] for val in iter_unpack('<f', value))
+
+        return unpack('<f', value)[0]
+
+    @staticmethod
+    def _to_cartesian_coords(vecs):
+        """Point position in cylindrical coordinates (phy,z,rho) to (x,y,z)"""
+
+        return np.stack([-vecs[:,2]*np.sin(vecs[:,0]),
+                         vecs[:,2]*np.cos(vecs[:,0]),
+                         vecs[:,1]], axis=1)
+
+
+    def get_projections_and_goemetry(self, slc=None):
+
+        rescale_intercept, rescale_slope = self.RescaleIntercept, self.RescaleSlope
+        virtual_projection = self.interp_on_virtual_detector()
+
+        if slc is None: slc = slice(0, len(self.slice_stack), 4)
+        n_proj = (slc.stop-1-slc.start)//slc.step +1
+
+        # Initialize empty volumes
+        source_position = np.empty((n_proj, 3), dtype='float32')
+        source_delta = np.empty((n_proj, 3), dtype='float32')
+        sinogram = np.empty((n_proj, self.NumberofDetectorRows, self.NumberofDetectorColumns), dtype='float32')
+
+        for i, slc in tqdm(enumerate(self.slice_stack[slc]), total=n_proj):  
+            # (phy_0, z_0, rho_0)
+            source_position[i] = list(map(lambda x: self._decode_float(x.value), 
+                                        (slc[0x7031, 0x1001], slc[0x7031, 0x1002], slc[0x7031, 0x1003])))
+            # FFS position delta
+            source_delta[i] = list(map(lambda x: self._decode_float(x.value), 
+                                        (slc[0x7033, 0x100B], slc[0x7033, 0x100C], slc[0x7033, 0x100D])))
+
+            rescale_slope, rescale_intercept = slc[0x0028,0x1053].value, slc[0x0028,0x1052].value
+            
+            sinogram[i] = virtual_projection(slc.pixel_array.T) *rescale_slope +rescale_intercept
+  
+        # (columns, rows)
+        detector_central_elem = self.DetectorCentralElement        
+        row_width, col_width = self.DetectorElementAxialSpacing, self.DetectorElementTransverseSpacing
+
+        # vector from central element to center of detector
+        delta_center = (self.NumberofDetectorRows/2 -detector_central_elem[1], 
+                        self.NumberofDetectorColumns/2 -detector_central_elem[0])
+
+        # position of central element
+        detector_position = np.stack([source_position[:,0] +np.pi, source_position[:,1],
+                                      self.ConstantRadialDistance -source_position[:,2]], axis=1)
+
+        # Adds FFS delta_position
+        source_position += source_delta
+
+        # position of detector center
+        detector_position[:,0] += delta_center[1] *col_width /self.ConstantRadialDistance # assume tan(theta) ~= theta & cos(theta) ~= 1
+        detector_position[:,1] -= delta_center[0] *row_width
+
+        # col, row unit vectors
+        u = np.stack([col_width*np.cos(source_position[:,0]),
+                      col_width*np.sin(source_position[:,0]),
+                      np.zeros(len(source_position))], axis=1)
+        v = np.concatenate([np.zeros((len(source_position),2)), 
+                            np.full((len(source_position),1), -row_width)], axis=1)
+        
+        proj_vecs = np.concatenate([self._to_cartesian_coords(source_position), 
+                                    self._to_cartesian_coords(detector_position), u, v], axis=1)
+
+        return sinogram, proj_vecs
+ 
+    def interp_on_virtual_detector(self):
+
+        detector_radius = self.ConstantRadialDistance
+        n_rows, n_cols = self.NumberofDetectorRows, self.NumberofDetectorColumns
+
+        detector_half_size = (n_rows/2 * self.DetectorElementAxialSpacing,
+                              n_cols/2 * self.DetectorElementTransverseSpacing)
+        virtual_detector_half_size = detector_radius *np.tan(detector_half_size[1] /detector_radius)
+
+        self.serie_metadata['virtual_detector_half_size'] = virtual_detector_half_size
+        self.serie_metadata['virtual_transverse_spacing'] = virtual_detector_half_size /(n_cols/2)
+
+        true_col_gr, true_row_gr = np.meshgrid(np.linspace(-detector_half_size[1], detector_half_size[1], n_cols),
+                                               np.linspace(-detector_half_size[0], detector_half_size[0], n_rows))
+
+        proj_col_gr = detector_radius *np.tan(true_col_gr /detector_radius)
+        proj_row_gr = np.tan(true_row_gr /detector_radius) * np.sqrt(proj_col_gr**2 + detector_radius**2)
+
+        # self.serie_metadata['virtual_axial_spacing'] = proj_row_gr[0,0] /(n_rows/2)
+        virtual_col_gr, virtual_row_gr = np.meshgrid(np.linspace(-virtual_detector_half_size, virtual_detector_half_size, n_cols), 
+                                                     np.linspace(-detector_half_size[0], detector_half_size[0], n_rows))
+
+        backproj_col_gr = detector_radius *np.arctan(virtual_col_gr /detector_radius)
+        backproj_row_gr = detector_radius *np.arctan(virtual_row_gr /np.sqrt(backproj_col_gr**2 + detector_radius**2))
+
+        # col_dist = in-plane dist from detector pixel to source
+        col_dist, row_dist = np.meshgrid(np.sqrt(virtual_col_gr[0]**2 + detector_radius**2), virtual_row_gr[:,0])
+        relative_ray_path_length = (np.sqrt(row_dist**2 + col_dist**2) /detector_radius).astype('float32')
+        
+        def interpolate(proj_slice):  
+            
+            interp = RectBivariateSpline(true_row_gr[:,0], true_col_gr[0], proj_slice)
+            virtual_proj = interp(backproj_row_gr, backproj_col_gr, grid=False).reshape(proj_slice.shape)
+            
+            # virtual_proj = griddata(np.stack((proj_row_gr.flatten(), proj_col_gr.flatten()), axis=1),
+            #                         proj_slice.flatten(),
+            #                         np.stack((virtual_row_gr.flatten(), virtual_col_gr.flatten()), axis=1), 
+            #                         fill_value=0).reshape(proj_slice.shape)
+
+            # square law attenuation on log intensities
+            return (virtual_proj +2*np.log(relative_ray_path_length)) #*relative_ray_path_length
+ 
+        return interpolate
+        
+        
+def reconstruct_MDCT():
+
+    serie_path = Path('data/N005/1.000000-Full_dose_projections-20314/')
+    # serie_path = Path('data/N012/09-03-2018-06804/1.000000-Full dose projections-88808')
+    # serie_path = Path('data/N296/09-03-2018-88975/1.000000-Full dose projections-84660')
+
+    reader = DicomReader(serie_path)
+
+    projections, proj_vecs = reader.get_projections_and_goemetry(slc=slice(10_000, 40_000, 4))
+    print(projections.min(), projections.max())
+    
+    mean_z = proj_vecs[:,2].mean()
+
+    scanner_params = astra_sim.SiemensCT(detector_size=(reader.NumberofDetectorRows, reader.NumberofDetectorColumns),
+                                         pixel_size=(reader.DetectorElementAxialSpacing, reader.virtual_transverse_spacing),
+                                        #  pixel_size=(reader.DetectorElementAxialSpacing, reader.DetectorElementTransverseSpacing),
+                                         source_origin_dist=reader.DetectorFocalCenterRadialDistance,
+                                         source_detector_dist=reader.ConstantRadialDistance)
+
+    reconstruction = astra_sim.FDK_reconstruction(projections, scanner_params, proj_vecs,
+                                                  voxel_size=.5, rec_shape=501, vol_center=(mean_z,0,0), gpu_id=GPU_ID)
+
+    water_attenuation_coeff = reader.WaterAttenuationCoefficient
+    reconstruction = 1000 * (reconstruction -water_attenuation_coeff) /water_attenuation_coeff
+    print(reconstruction.min(), reconstruction.max())
+
+    Path('data/N005/reconstruction/').mkdir(exist_ok=True)
+    for i in range(len(reconstruction)):
+        imsave(f'data/N005/reconstruction/slice_{i:0>4}.tif', reconstruction[i])
+
+    radial_slices = astra_sim.radial_slice_sampling(np.clip(reconstruction, -1500, 2500), np.linspace(0, np.pi, 180, endpoint=False))
+    
+    utils.save_vid(f'outputs/LDCT_reconstruction.avi', 
+                   radial_slices[...,None])
+
+    for i in range(len(radial_slices)):
+        imsave(f'data/N005/reconstruction/slice_radial_{i:0>4}.tif', radial_slices[i])
+
+
 def main():    
-    test_astra_sim()
+    # test_astra_sim()
+    # validate_CB_simulation()
+    reconstruct_MDCT()
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-g', '--gpu', type=int, nargs='?', default=0,
                         help='GPU to run astra sims on')
-    parser.add_argument('--walnut_id', type=int, nargs='?', default=7,
+    parser.add_argument('--walnut_id', type=int, nargs='?', default=13,
                         help='GPU to run astra sims on')
     parser.add_argument('--orbit_id', type=int, nargs='?', default=2,
                         choices=(1,2,3), help='GPU to run astra sims on')
