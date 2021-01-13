@@ -39,7 +39,7 @@ class FleX_ray_scanner(CTScanner):
         if name is None: name = self.__class__.__name__
         super().__init__(name, detector_size, pixel_size, bin_factor, source_origin_dist, source_detector_dist, **kwargs)
 
-        self.FoV = tuple(map(lambda x: x * self.pixel_size, self.detector_size))
+        self.FoV = tuple(map(lambda p,d: p*d, self.pixel_size, self.detector_size))
 
 class SiemensCT(CTScanner):
     """Siemens CT scanner from LDCT dataset"""
@@ -96,13 +96,13 @@ def create_scan_geometry(scan_params, n_projs, elevation=0):
                   for theta in scan_angles])
    
     # col pixel spacing vector
-    u = np.array([(scan_params.pixel_effective_size * np.cos(theta),
-                   scan_params.pixel_effective_size * np.sin(theta),
+    u = np.array([(scan_params.pixel_effective_size[1] * np.cos(theta),
+                   scan_params.pixel_effective_size[1] * np.sin(theta),
                    0)
                   for theta in scan_angles])
 
     # row pixel spacing vector
-    v = np.array([(0, 0, scan_params.pixel_effective_size) for _ in scan_angles])
+    v = np.array([(0, 0, scan_params.pixel_effective_size[0]) for _ in scan_angles])
 
     return np.concatenate((src, d, u, v), axis=1).astype('float32')
 

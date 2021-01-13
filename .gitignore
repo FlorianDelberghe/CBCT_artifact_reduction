@@ -6,6 +6,10 @@ outputs/
 WalnutReconstructionCodes/
 code/
 report/
+Results/
+Walnut33/
+walnut33_input/
+data/
 
 # Files:
 *.log
