@@ -16,10 +16,10 @@ class CTScanner():
         # (rows, cols)
         self.detector_size = detector_size        
         self.pixel_size = pixel_size if isinstance(pixel_size, tuple) else (pixel_size,) *2
-
+        
         self.bin_factor = int(bin_factor)
         self.detector_effective_size = tuple(map(lambda x: int(x /bin_factor), self.detector_size))
-        self.pixel_effective_size = tuple(map(lambda x: int(x /bin_factor), self.pixel_size))
+        self.pixel_effective_size = tuple(map(lambda x: x *bin_factor, self.pixel_size))
 
         self.source_origin_dist = source_origin_dist
         self.source_detector_dist = source_detector_dist
@@ -39,7 +39,7 @@ class FleX_ray_scanner(CTScanner):
         if name is None: name = self.__class__.__name__
         super().__init__(name, detector_size, pixel_size, bin_factor, source_origin_dist, source_detector_dist, **kwargs)
 
-        self.FoV = tuple(map(lambda p,d: p*d, self.pixel_size, self.detector_size))
+        self.FoV = tuple(map(lambda p,d: p*d, self.pixel_effective_size , self.detector_effective_size))
 
 class SiemensCT(CTScanner):
     """Siemens CT scanner from LDCT dataset"""
@@ -58,7 +58,6 @@ class SiemensCT(CTScanner):
         self.FoV = 500
 
 
-
 def rotate_astra_vec_geom(vecs, theta):
     """Rotates the scanning vector geometry by theta rad in XY plane"""
 
@@ -69,7 +68,7 @@ def rotate_astra_vec_geom(vecs, theta):
     return np.concatenate([vecs[:, i:i+3] @ rot_mat.T for i in range(0, 12, 3)], axis=1)
 
 
-def create_scan_geometry(scan_params, n_projs, elevation=0):
+def create_scan_geometry(scan_params, n_projs, elevation=0.):
     """Creates vectors for free scanning geometry with CW rotation of the X-ray sources around the sample
 
         Args:
@@ -131,7 +130,7 @@ def create_CB_projection(ct_volume, scanner_params, proj_vecs, voxel_size=.1, **
     vol_geom = astra.creators.create_vol_geom(*np.transpose(ct_volume, (1,2,0)).shape,
         *[sign*size/2*voxel_size for size in np.transpose(ct_volume, (2,1,0)).shape for sign in [-1,1]]
     )
-
+    
     # [z,x,y] axis order for volume data
     proj_id = astra.data3d.create('-vol', vol_geom, data=ct_volume)    
     proj_geom = astra.create_proj_geom('cone_vec', 
