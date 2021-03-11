@@ -3,6 +3,7 @@ import logging
 import re
 import random
 from pathlib import Path
+from torch.distributions.poisson import Poisson
 
 import imageio
 import numpy as np
@@ -88,23 +89,132 @@ def _load_natural_image(path):
         return img
 
 
-def data_augmentation(func):
-    """__getitem__() decorator to add ability to augment the data"""
+class ImageTransform():
 
-    def random_flip(*ts, p=0):
-        """Random flip along one of the image axis Y with p"""
+    def __init__(self, name, p):
+        self.name = name
+        self.p = p
+
+    def __call__(self, image, target):
+        return self.transform(image, target)
+
+    def transform(self, image, target):
+        raise NotImplementedError("Virtual class to be implemented in daughter classes")
+
+class TransformList():
+
+    def __init__(self, transforms):
+        self.transforms = transforms
+
+    def __call__(self, image, target):
+        for t in self.transforms:
+            image, target = t(image, target)
         
-        if p > .5:
-            return tuple(map(lambda t: torch.flip(t, (-2,)), ts))      
+        return image, target
 
-        return ts            
+
+class GaussianNoise(ImageTransform):
+
+    def __init__(self, mean, std, p=1., which='input'):
+        super().__init__(name='GaussianNoise', p=p)
+        
+        self.mean = mean
+        self.std = std
+        self.which = which
+
+    def add_noise(self, t): 
+        return t.add(torch.empty_like(t).normal_(self.mean, self.std))
+
+    def transform(self, image, target):
+
+        if random.random() > self.p:
+            return image, target
+
+        with torch.no_grad():
+            if self.which == 'input':
+                return self.add_noise(image), target
+
+            elif self.which == 'output':
+                return image, self.add_noise(target)
+
+            elif self.which == 'both':
+                return self.add_noise(image), self.add_noise(target)
+
+            raise ValueError()
+
+class PoissonNoise(ImageTransform):
+    def __init__(self, p=1., which='input'):
+        super().__init__(name='PoissonNoise', p=p)
+
+        self.scaling = 1e3
+        self.which = which
+        
+    def add_noise(self, t):
+        return Poisson(t.clamp(0, None).mul(self.scaling)).sample().div(self.scaling)
+
+    def transform(self, image, target):
+
+        if random.random() > self.p:
+            return image, target
+
+        with torch.no_grad():
+            if self.which == 'input':
+                return self.add_noise(image), target
+
+            elif self.which == 'output':
+                return image, self.add_noise(target)
+
+            elif self.which == 'both':
+                return self.add_noise(image), self.add_noise(target)
+
+            raise ValueError()
+
+
+class RandomVFlip(ImageTransform):
+
+    def __init__(self, p=.5):
+        super().__init__(name='RandomVFlip', p=p)
+
+    def transform(self, image, target):
+        if random.random() < self.p:
+            return torch.flip(image, (-1,)), torch.flip(target, (-1,))
+
+        return image, target
+
+class RandomHFlip(ImageTransform):
+
+    def __init__(self, p=.5):
+        super().__init__(name='RandomHFlip', p=p)
+
+    def transform(self, image, target):
+        if random.random() < self.p:
+            return torch.flip(image, (-2,)), torch.flip(target, (-2,))
+
+        return image, target
+
+
+# def data_augmentation(func):
+#     """__getitem__() decorator to add ability to augment the data"""
+
+#     def random_flip(*ts, p=0):
+#         """Random flip along one of the image axis Y with p"""
+        
+#         if p > .5:
+#             return tuple(map(lambda t: torch.flip(t, (-2,)), ts))      
+
+#         return ts            
                 
-    def _data_aug(self, *args, **kwargs):
+#     def _data_aug(self, *args, **kwargs):
 
-        image, target = func(self, *args, **kwargs)
-        return random_flip(*(image, target), p=random.random()*self.data_augmentation)        
+#         if not self.data_augmentation:
+#             return func(self, *args, **kwargs)
 
-    return _data_aug
+#         image, target = func(self, *args, **kwargs)
+#         # return self.image_transform(image, target)
+
+#         return random_flip(*(image, target), p=random.random()*self.data_augmentation)        
+
+#     return _data_aug
 
 
 class ImageStack(object):
@@ -254,9 +364,10 @@ class ImageDataset(Dataset):
         self,
         input_paths,  
         target_paths, 
-        collapse_channels=False,
-        labels=None,
-        data_augmentation=True
+        device=None,
+        # collapse_channels=False,
+        # labels=None,
+        transforms=None
     ):
         """Create a new image dataset.
 
@@ -302,20 +413,24 @@ class ImageDataset(Dataset):
         :rtype:
 
         """
-        super(ImageDataset, self).__init__()
+        super().__init__()
+
         self.input_paths = input_paths
         self.target_paths = target_paths
-        self.collapse_channels = collapse_channels
-        self.labels = labels
-        self.data_augmentation = data_augmentation
+        # self.collapse_channels = collapse_channels
+        # self.labels = labels
+        self.transforms = transforms
+
+        if device is None:
+            self.device = torch.cuda.current_device() if torch.cuda.is_available() else torch.device('cpu')
+        else:
+            self.device = device
 
         # Do not collapse channels in the target images when we do
         # segmentation. This is not supported.
-        collapse_target = collapse_channels and labels is None
-        self.input_stack = ImageStack(
-            input_paths, collapse_channels=collapse_channels)
-        self.target_stack = ImageStack(
-            target_paths, collapse_channels=collapse_target, labels=labels)
+        # collapse_target = collapse_channels and labels is None
+        self.input_stack = ImageStack(input_paths)
+        self.target_stack = ImageStack(target_paths)
 
         if len(self.input_stack) != len(self.target_stack):
             raise InputError(
@@ -324,16 +439,19 @@ class ImageDataset(Dataset):
             )
 
     def __len__(self):
-        return len(self.input_stack)
+        return len(self.target_stack)
 
-    @data_augmentation
     def __getitem__(self, i):
-        if random.random() > .5:
-            return self.input_stack[i].to(device=self.device), self.target_stack[i].to(device=self.device)
+        # Imports input image from a random or chosen orbit height  
+        input_img, target_img = self.input_stack[i].to(device=self.device), self.target_stack[i].to(device=self.device)
 
-        # Returns mirror image half the time
-        return torch.flip(self.input_stack[i].to(device=self.device), (-1,)), \
-            torch.flip(self.target_stack[i].to(device=self.device), (-1,))
+        if self.transforms is not None:
+            input_img, target_img = self.transforms(input_img.to(device=self.device), target_img.to(device=self.device))
+        else:
+            input_img, target_img = input_img.to(device=self.device), target_img.to(device=self.device)
+
+        # returns mirror image from [np.pi, 2*np.pi[ radial sampling half the time
+        return self.vert_symetry(input_img, target_img)
 
     @property
     def num_labels(self):
@@ -351,7 +469,7 @@ class ImageDataset(Dataset):
 
 class MultiOrbitDataset(Dataset):
 
-    def __init__(self, input_paths, target_paths, which_orbit='rand', device=None, **kwargs):
+    def __init__(self, input_paths, target_paths, which_orbit='rand', device=None, transforms=None, vert_sym=True, **kwargs):
         """Dataset for training with multiple orbits as input images corresponding to the same ground truth target image
 
         Arguments:
@@ -359,17 +477,17 @@ class MultiOrbitDataset(Dataset):
             input_paths (list): [id,orbit,slc] of the training data
             target_paths (list): [id,slc] 
             which_orbit (str/int): if int -> orbit in range(1, len(input_paths[i])+1)
-        
         """
-
-        super(MultiOrbitDataset, self).__init__()
+        super().__init__()
 
         if device is None:
             self.device = torch.cuda.current_device() if torch.cuda.is_available() else torch.device('cpu')
         else:
             self.device = device
-        self.data_augmentation = kwargs.get('data_augmentation', True)
 
+        self.vert_symetry = RandomVFlip(p=.5) if vert_sym else None
+        self.transforms = transforms
+        
         # Adds channel dim if needed to have dims: [id,channel,slice]
         self.input_paths = np.array(input_paths)
         if len(self.input_paths.shape) == 2: self.input_paths = np.expand_dims(input_paths, 1)         
@@ -390,17 +508,22 @@ class MultiOrbitDataset(Dataset):
     def __len__(self):
         return len(self.target_stack)
 
-    @data_augmentation
+    # @data_augmentation
     def __getitem__(self, i):
         # Imports input image from a random or chosen orbit height  
-        input_stacks, target_stacks = \
+        input_img, target_img = \
             (self.input_stacks[random.randint(0, len(self.input_stacks)-1)][i], self.target_stack[i]) \
             if self.which_orbit == -1 else (self.input_stacks[self.which_orbit-1][i], self.target_stack[i])
 
-        # returns mirror image from [np.pi, 2*np.pi[ radial sampling half the time
-        if random.random() > .5:
-            return input_stacks.to(device=self.device), target_stacks.to(device=self.device)
+        if self.transforms is not None:
+            input_img, target_img = self.transforms(input_img.to(device=self.device), target_img.to(device=self.device))
+        else:
+            input_img, target_img = input_img.to(device=self.device), target_img.to(device=self.device)
 
-        return torch.flip(input_stacks.to(device=self.device), (-1,)), \
-            torch.flip(target_stacks.to(device=self.device), (-1,))
+        # returns mirror image from [np.pi, 2*np.pi[ radial sampling half the time
+        if self.vert_symetry is not None:
+            return self.vert_symetry(input_img, target_img)
+
+        return input_img, target_img
+
 

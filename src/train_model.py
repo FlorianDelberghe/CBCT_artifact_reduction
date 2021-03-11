@@ -9,8 +9,8 @@ from torch import nn
 from tqdm import tqdm
 from pathlib import Path
 
-from .utils import evaluate, imsave
-
+from .utils.io import imsave
+from .utils.nn import evaluate
 
 def TVRegularization(scaling=1, in_channels=1):
     """Total variation regularization implementation using torcn.nn.Conv2d() layer"""
@@ -71,7 +71,7 @@ class MetricsLogger():
                               np.linspace(0, max(iters), min(9, len(iters))).astype('int16')))
         plt.grid(axis='x')
         plt.ylabel(kwargs.get('ylabel', 'Loss'))
-        plt.ylim(kwargs.get('ylim', [0,5e-4]))
+        plt.ylim(kwargs.get('ylim', [0,1e-3]))
         plt.title(kwargs.get('title', ''))
         plt.legend()
         plt.savefig(kwargs.get('filename', 'outputs/training_losses.png'))
@@ -112,7 +112,8 @@ def train(model, dataloaders, loss_criterion, epochs, regularization=None, **kwa
     train_dl, val_dl = dataloaders
 
     optimizer = torch.optim.Adam(model.msd.parameters(), lr=kwargs.get('lr', 1e-3))
-    gamma = 1e-2 **(1/(epochs-10))
+    cutoff_epoch = kwargs.get('cutoff_epoch', 10)
+    gamma =  kwargs.get('gamma', 1e-2 **(1/(epochs-cutoff_epoch)))
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
 
     # Evaluate starting state of model
@@ -125,7 +126,7 @@ def train(model, dataloaders, loss_criterion, epochs, regularization=None, **kwa
     save_val = save_val_sample_pred(val_dl)
     save_val(model, 'outputs/val_ims_e0.png')
 
-    for e in range(epochs):
+    for e in range(epochs):        
         batches = tqdm(train_dl, desc=f"epoch {e+1}", position=0)
         running_loss = []
 
@@ -154,7 +155,7 @@ def train(model, dataloaders, loss_criterion, epochs, regularization=None, **kwa
                     running_loss.clear()
                     loss_tracker.update(e*len(train_dl)+i+1, tr_loss, val_loss)
 
-        if e+1 >= 10: scheduler.step()
+        if e+1 >= cutoff_epoch: scheduler.step()
         loss_tracker.plot(filename=f'{save_folder}/training_losses.png',
                           xticks=[i*len(train_dl) for i in range(e+2)])
 
@@ -169,6 +170,13 @@ def train(model, dataloaders, loss_criterion, epochs, regularization=None, **kwa
 
     loss_tracker.save(f"{save_folder}/losses.txt")
     torch.save(best_state, f"{save_folder}/best_model_{best_epoch}.h5")
+
+    torch.save({'epoch': e+1,
+                'model_state_dict': model.net.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler': scheduler
+                },
+               f"{save_folder}/end_training.h5")
 
 
 def cross_validation_train():

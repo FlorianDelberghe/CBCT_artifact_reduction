@@ -83,18 +83,18 @@ class outconv(nn.Module):
         return x
 
 class UNet(nn.Module):
-    def __init__(self, n_channels, n_classes):
+    def __init__(self, c_in, c_out, n_filters=64):
         super(UNet, self).__init__()
-        self.inc = inconv(n_channels, 64)
-        self.down1 = down(64, 128)
-        self.down2 = down(128, 256)
-        self.down3 = down(256, 512)
-        self.down4 = down(512, 512)
-        self.up1 = up(1024, 256)
-        self.up2 = up(512, 128)
-        self.up3 = up(256, 64)
-        self.up4 = up(128, 64)
-        self.outc = outconv(64, n_classes)
+        self.inc = inconv(c_in, n_filters)
+        self.down1 = down(n_filters, n_filters *2)
+        self.down2 = down(n_filters *2, n_filters *4)
+        self.down3 = down(n_filters *4, n_filters *8)
+        self.down4 = down(n_filters *8, n_filters *8)
+        self.up1 = up(n_filters *16, n_filters *4)
+        self.up2 = up(n_filters *8, n_filters *2)
+        self.up3 = up(n_filters *4, n_filters)
+        self.up4 = up(n_filters *2, n_filters)
+        self.outc = outconv(n_filters, c_out)
 
     def forward(self, x):
         H, W = x.shape[2:]
@@ -122,58 +122,69 @@ class UNet(nn.Module):
         pass
 
 class UNetRegressionModel(MSDModel):
-    def __init__(self, c_in, c_out, depth, width, loss, dilations, reflect, conv3d):
-        # Initialize msd network.
-        super().__init__(c_in, c_out, 1, 1, dilations)
-
-        loss_functions = {'L1': nn.L1Loss(),'L2': nn.MSELoss()}
     
-        self.loss_function = loss
-        self.criterion = loss_functions[loss]
-        assert(self.criterion is not None)
+    def __init__(self, c_in, c_out, *, width=64, reflect=False, conv3d=False, **kwargs):
+        # Initialize msd network.
+        super().__init__(c_in, c_out, 1, 1)
+
+        # loss_functions = {'L1': nn.L1Loss(),'L2': nn.MSELoss()}
+    
+        # self.loss_function = loss
+        # self.criterion = loss_functions[loss]
+        # assert(self.criterion is not None)
+
         # Make Unet
-        self.msd = UNet(c_in, 1)
+        self.msd = UNet(c_in, c_out, width)
 
         # Initialize network
         self.net = nn.Sequential(self.scale_in, self.msd, self.scale_out)
         self.net.cuda()
 
         # Train all parameters apart from self.scale_in.
-        self.init_optimizer(self.msd)
+        # self.init_optimizer(self.msd)
 
-    def set_normalization(self, dataloader):
-        """Normalize input data.
+    def __call__(self, input_):
+        return self.net(input_)
+        
+    def eval(self):
+        self.msd.eval()
 
-        This function goes through all the training data to compute
-        the mean and std of the training data. It modifies the
-        network so that all future invocations of the network first
-        normalize input data. The normalization parameters are saved.
+    def train(self):
+        self.msd.train()
 
-        :param dataloader: The dataloader associated to the training data.
-        :returns:
-        :rtype:
+    # def set_normalization(self, dataloader):
+    #     """Normalize input data.
 
-        """
-        mean = 0
-        square = 0
-        for (data_in, _) in dataloader:
-            mean += data_in.mean()
-            square += data_in.pow(2).mean()
+    #     This function goes through all the training data to compute
+    #     the mean and std of the training data. It modifies the
+    #     network so that all future invocations of the network first
+    #     normalize input data. The normalization parameters are saved.
 
-        mean /= len(dataloader)
-        square /= len(dataloader)
-        std = np.sqrt(square - mean ** 2)
+    #     :param dataloader: The dataloader associated to the training data.
+    #     :returns:
+    #     :rtype:
 
-        # The input data should be roughly normally distributed after
-        # passing through net_fixed. 
-        self.scale_in.bias.data.fill_(- mean / std)
-        self.scale_in.weight.data.fill_(1 / std)
+    #     """
+    #     mean = 0
+    #     square = 0
+    #     for (data_in, _) in dataloader:
+    #         mean += data_in.mean()
+    #         square += data_in.pow(2).mean()
 
-    def set_target(self, data):
+    #     mean /= len(dataloader)
+    #     square /= len(dataloader)
+    #     std = (square - mean ** 2).sqrt()
+
+    #     # The input data should be roughly normally distributed after
+    #     # passing through net_fixed. 
+    #     self.scale_in.bias.data.fill_(- mean / std)
+    #     self.scale_in.weight.data.fill_(1 / std)
+
+    # def set_target(self, data):
                 
-        # The class labels must reside on the GPU
-        target = data.cuda()
-        self.target = Variable(target)
+    #     # The class labels must reside on the GPU
+    #     target = data.cuda()
+    #     self.target = Variable(target)
 
 
 class ResMSDModel(MSDModel):

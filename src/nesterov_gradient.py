@@ -46,7 +46,7 @@ class AcceleratedGradientPlugin(astra.plugin.base):
             b_k = b_k1 / b_k1_norm
         return b_k1_norm
 
-    def initialize(self, cfg, liptschitz=1, MinConstraint = None, MaxConstraint = None):
+    def initialize(self, cfg, liptschitz=1, MinConstraint=None, MaxConstraint=None):
         self.W = astra.OpTomo(cfg['ProjectorId'])
         self.vid = cfg['ReconstructionDataId']
         self.sid = cfg['ProjectionDataId']

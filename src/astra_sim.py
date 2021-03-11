@@ -8,6 +8,13 @@ from .utils import timeit
 
 
 class CTScanner():
+    """Super class to store scanner geometries, all sizes in mm
+        Args:
+        -----
+            detector_size (tuple): n_pixels of detector, (rows, columns)
+            pixel_size (tuple, int): size of pixels int (square) or tuple if rectangular
+            bin_factor (int): binning of the detector pixels"""
+
     def __init__(self, name,
                  detector_size, pixel_size, bin_factor, source_origin_dist, source_detector_dist, **kwargs):
 
@@ -26,7 +33,7 @@ class CTScanner():
         self.origin_detector_dist = self.source_detector_dist - self.source_origin_dist
 
 class FleX_ray_scanner(CTScanner):
-    """Class for storage of the CBCT scanners intrinsic parameters, sizes in mm"""
+    """CBCT scanner from Walnut dataset (https://doi.org/10.1038/s41597-019-0235-y)"""
 
     def __init__(self, name=None,
                  detector_size=(1944, 1536),
@@ -42,7 +49,7 @@ class FleX_ray_scanner(CTScanner):
         self.FoV = tuple(map(lambda p,d: p*d, self.pixel_effective_size , self.detector_effective_size))
 
 class SiemensCT(CTScanner):
-    """Siemens CT scanner from LDCT dataset"""
+    """Siemens CT scanner from LDCT dataset (https://wiki.cancerimagingarchive.net/pages/viewpage.action?pageId=52758026)"""
 
     def __init__(self, name=None,
                  detector_size=(64, 736),
@@ -65,7 +72,7 @@ def rotate_astra_vec_geom(vecs, theta):
                          [np.sin(theta),  np.cos(theta), 0],
                          [            0,              0, 1]])
 
-    return np.concatenate([vecs[:, i:i+3] @ rot_mat.T for i in range(0, 12, 3)], axis=1)
+    return np.concatenate([vecs[:,i:i+3] @ rot_mat.T for i in range(0, 12, 3)], axis=1)
 
 
 def create_scan_geometry(scan_params, n_projs, elevation=0.):

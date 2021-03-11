@@ -43,6 +43,9 @@ large amount of human head & neck scans that can be used to upgrade our limited 
 limiting however (5mm), to solve that, we try to reconstruct high resolution images from the included projection data 
 to get ~1mm axial resolution.  
 
+14.01.2021:
+CBCT simaulated phantoms from (usb) MDCT phantoms (7 volumes) -> redo experiments with the extra volumes
+
 
 ## Structure:
 ```

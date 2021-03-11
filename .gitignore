@@ -10,6 +10,7 @@ Results/
 Walnut33/
 walnut33_input/
 data/
+model_weights/
 
 # Files:
 *.log

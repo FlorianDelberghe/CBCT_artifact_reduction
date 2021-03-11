@@ -3,33 +3,205 @@ import os
 import random
 import sys
 import time
-from datetime import datetime
+from collections.abc import Iterable
+from contextlib import contextmanager
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
 import torch
+from matplotlib import cm
 from skimage.filters import threshold_multiotsu
 from skimage.metrics import structural_similarity
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from . import utils
-from .image_dataset import ImageDataset
 from .utils import ValSampler, evaluate, imsave
 
+colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
-def test(model, dataloader):
-    """Computes metrics ['MSE', 'SSIM', 'DSC'] for provifded model and sample of dataset"""
+@contextmanager
+def set_rcParams(**kwargs):
+    
+    plt_params = {'figure.figsize': (10,10),
+                  'xtick.labelsize': 24,
+                  'ytick.labelsize': 24,
+                  'axes.titlesize': 30,
+                  'axes.labelsize': 24}
 
-    metrics = np.empty((3, len(dataloader)))
+    if kwargs is not None: plt_params.update(kwargs)
+    default_rcParams = dict(map(lambda key: (key, plt.rcParams[key]), plt_params.keys()))
+
+    plt.rcParams.update(plt_params)
+
+    try: yield
+    
+    except: raise
+
+    finally: 
+        plt.rcParams.update(default_rcParams)
+    
+def _to_iterable(obj):
+    """Makes sure object can be used as an iterable, allows support for for loops with list or single arguments inputs"""
+
+    if isinstance(obj, Iterable): 
+        return obj
+
+    return [obj]
+
+
+# ======================================= #
+# =============== Metrics =============== #
+# ======================================= #
+
+def eval_init_metrics(metrics_names, dataset, n_samples=50):
+
+    dl = DataLoader(dataset, batch_size=1, sampler=ValSampler(len(dataset), n_samples), drop_last=False)
+
+    metrics = _to_iterable(metrics_names)
+    metrics_array = np.array([compute_metric(input_, target, metric) for metric in metrics for input_, target in dl]
+                             ).reshape((len(metrics), n_samples))
+
+    return metrics_array.mean(1)
+
+def eval_metrics(models, metrics_names, dataset, n_samples=50):
+
+    dl = DataLoader(dataset, batch_size=1, sampler=ValSampler(len(dataset), n_samples), drop_last=False)
+
+    models = _to_iterable(models)
+    metrics = _to_iterable(metrics_names)
+
+    metrics_arrays = []
+    for model in tqdm(models):
+        with evaluate(model):
+            metrics_arrays.append(
+                np.array([compute_metric(model(input_), target, metric)
+                          for metric in metrics for input_, target in dl]
+                         ).reshape((len(metrics), n_samples)))
+
+    return np.stack(metrics_arrays, axis=0)
+
+def get_metrics_stats(metrics):
+    """metrics np.ndarray of shape [models, metrics, samples]"""
+    return metrics.mean(-1), metrics.std(-1)
+
+@set_rcParams()
+def plot_metrics(metrics, model_names, metric_names, filename='metrics.png'):
+    global colors
+    
+    fig, axes = plt.subplots(1, len(metric_names), figsize=(40,10))
+    
+    for i, name in enumerate(metric_names):
+        axes[i].boxplot(metrics[:,i].T)
+        axes[i].set_title(name)
+        axes[i].set_xticklabels(model_names, rotation=30)
+
+    plt.savefig(Path('outputs/') / filename)
+
+@set_rcParams()
+def plot_metrics_CV(metrics, model_names, metric_names, ref_metrics=None, filename='metrics_CV.png'):
+    global colors
+        
+    fig, axes = plt.subplots(1, len(metric_names), figsize=(len(metric_names) *10,10))
+
+    if ref_metrics is not None:
+        for i, name in enumerate(metric_names):
+            axes[i].plot([-.5, len(model_names)-.5], (ref_metrics[i],) *2, '--k', linewidth=4, alpha=.5)
+
+    for j in range(len(metrics)):
+        for i, name in enumerate(metric_names):
+
+            axes[i].boxplot(metrics[j][:, i].T, positions=np.arange(len(metrics[j]))+(j-1)*.15, widths=.1,
+                            boxprops={'color': colors[j]}, whiskerprops={'color': colors[j]},
+                            capprops={'color': colors[j]}, medianprops={'color': 'k'})
+
+            if j == len(metrics)-1:
+                axes[i].set_title(name)
+                axes[i].set_xticks(np.arange(len(metrics[j])))
+                axes[i].set_xticklabels(model_names, rotation=30)
+
+    plt.savefig(Path('outputs/') / filename)
+        
+def get_metrics_table(metrics, models_names, metrics_names, stdout=None):
+    """metrics np.ndarray of shape [models, metrics, samples]"""
+    print(metrics.shape)
+    
+    if stdout is not None:
+        default_stdout = sys.stdout
+        sys.stdout = stdout
+
+    print(r'\begin{tabular}', end='')
+    print('{'+ '{}'.format(' '.join(['l'] + ['c' for _ in range(len(models_names))])) +'}', end=' \\\\\n')
+    print(' & ' + ' & '.join(models_names))
+
+    for i, metric in enumerate(metrics_names):
+        print(f'{metric.upper():4s} & ', end='')
+        print(' & '.join([f'${metrics[j,i].mean():.4e} \\pm {metrics[j,i].std():.4e}$'
+                          for j in range(len(metrics))]), end=' \\\\\n')
+
+    print(r'\end{tabular}')
+
+
+def compute_metric_evolution(model, metrics, state_dicts, dataset, n_samples=50):
+
+    metrics_te = np.zeros((len(metrics), len(state_dicts)+1, n_samples))
+    state_dicts = (torch.load(state_dict, map_location='cpu') for state_dict in state_dicts)
+
+    dl = DataLoader(dataset, batch_size=1, sampler=ValSampler(len(dataset), n_samples), drop_last=False)
+
     with evaluate(model):
-        for i, (input_, target) in enumerate(dataloader):
-            pred = model(input_)
+        metrics_te[:,0] = np.array([[compute_metric(model(input_), target, metric) for metric in metrics]
+                                   for input_, target in dl]).T
 
-            metrics[:,i] = mse(pred, target), ssim(pred, target), dsc(pred, target)                   
+        for i, state_dict in enumerate(state_dicts):
+            model.msd.load_state_dict(state_dict)
 
-    return metrics.mean(axis=1), metrics.std(axis=1)
+            metrics_te[:,i+1] = np.array([[compute_metric(model(input_), target, metric) for metric in metrics]
+                                   for input_, target in dl]).T
+
+    return metrics_te
+
+
+# ======================================= #
+# ============ Representation =========== #
+# ======================================= #
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def noise_robustness(model, dataloader, noise='gaussian', **kwargs):
@@ -77,75 +249,27 @@ def noise_robustness(model, dataloader, noise='gaussian', **kwargs):
     plt.close(fig)
 
 
-def compare_models(models, dataloader, names=None, title=None):
-    
-    n_models = len(models)
-    names = [f'Model{i+1}' for i in range(n_models)] if names is None else names
-
-    metrics = np.empty((3 *n_models, len(dataloader)))
-    with evaluate(*models):
-        for i, (input_, target) in enumerate(dataloader):
-            preds = [model(input_) for model in models]
-
-            metrics[:n_models,i] = [mse(pred, target) for pred in preds]
-            metrics[n_models:2*n_models,i] = [ssim(pred, target) for pred in preds]
-            metrics[2*n_models:,i] = [dsc(pred, target) for pred in preds]                    
-
-    fig, axes = plt.subplots(ncols=3, figsize=(15,5))
-    
-    metric_names = ['MSE', 'SSIM', 'DSC']
-    for i in range(3):
-        axes[i].boxplot(metrics[n_models*i:n_models*i+n_models].T, positions=np.arange(n_models))
-        axes[i].set_xticklabels(names)
-        axes[i].set_title(metric_names[i])
-
-    axes[0].set_ylim([0,None])
-    plt.suptitle(title)
-    plt.savefig('outputs/model_comparison.png')
 
 
-def plot_metrics_evolution(model, state_dicts, dataset, title=None,
-                           filename='outputs/metrics_evolution.png'):
-
-    n_samples = 100
-    metrics = np.zeros((3, len(state_dicts)+1, n_samples))
-
-    # Loading the state_dicts from files
-    if isinstance(state_dicts[0], (str, Path)):
-        state_dicts = (torch.load(state_dict) for state_dict in state_dicts)
-
-    te_dl = DataLoader(dataset, batch_size=1, sampler=ValSampler(len(dataset), n_samples=n_samples))
-
-    with evaluate(model):
-        metrics[:,0,:] = np.array(
-                [[mse(model(input_), target), ssim(model(input_), target), dsc(model(input_), target)]
-                 for input_, target in te_dl]).T
-
-        for i, state_dict in enumerate(state_dicts):
-            model.msd.load_state_dict(state_dict)
-            metrics[:,i+1,:] = np.array(
-                [[mse(model(input_), target), ssim(model(input_), target), dsc(model(input_), target)]
-                 for input_, target in te_dl]).T
-
-    metric_names = ['MSE', 'SSIM', 'DSC']
-    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+@set_rcParams()
+def plot_metrics_evolution(metrics, metrics_names, title=None, filename='outputs/metrics_evolution.png'):
+    global colors
 
     fig, ax = plt.subplots(figsize=(10,10))
     ax2 = ax.twinx()
 
     xticks = np.arange(metrics.shape[1])
-    line1 = ax.plot(xticks, metrics[0].mean(1), c=colors[0])
+    line1 = ax.plot(xticks, metrics[0].mean(1) *metrics[3].mean(1).max() /metrics[0].mean(1).max(), c=colors[0])
     line2 = ax2.plot(xticks, metrics[1].mean(1), c=colors[1])
     line3 = ax2.plot(xticks, metrics[2].mean(1), c=colors[2])
+    line4 = ax.plot(xticks, metrics[3].mean(1) , c=colors[3])
 
-    ax.plot(xticks, metrics[0].mean(1) +metrics[0].std(1)/10, c=colors[0], alpha=.3)
-    ax.plot(xticks, metrics[0].mean(1) -metrics[0].std(1)/10, c=colors[0], alpha=.3)
-    ax2.plot(xticks, metrics[1].mean(1) +metrics[1].std(1)/10, c=colors[1], alpha=.3)
-    ax2.plot(xticks, metrics[1].mean(1) -metrics[1].std(1)/10, c=colors[1], alpha=.3)
-    ax2.plot(xticks, metrics[2].mean(1) +metrics[2].std(1)/10, c=colors[2], alpha=.3)
-    ax2.plot(xticks, metrics[2].mean(1) -metrics[2].std(1)/10, c=colors[2], alpha=.3)
+    ax.fill_between(xticks, metrics[0].mean(1) -metrics[0].std(1), metrics[0].mean(1) +metrics[0].std(1), color=colors[0], alpha=.2)
+    ax.fill_between(xticks, metrics[3].mean(1) -metrics[3].std(1), metrics[3].mean(1) +metrics[3].std(1), color=colors[3], alpha=.2)
+    ax2.fill_between(xticks, metrics[1].mean(1) -metrics[1].std(1), metrics[1].mean(1) +metrics[1].std(1), color=colors[1], alpha=.2)
+    ax2.fill_between(xticks, metrics[2].mean(1) -metrics[2].std(1), metrics[2].mean(1) +metrics[2].std(1), color=colors[2], alpha=.2)
     
-    plt.legend(line1+line2+line3, metric_names)
+    plt.legend(line1+line2+line3+line4, metrics_names)
     ax.set_xticks(xticks[::2])
     ax.set_xlabel('Epoch')
     ax.set_ylabel('MSE Loss')
@@ -154,7 +278,8 @@ def plot_metrics_evolution(model, state_dicts, dataset, title=None,
     ax2.set_yticks(np.linspace(0,1,11))
     ax2.yaxis.grid()
     ax.set_title(title)
-    plt.savefig( )
+    plt.savefig(filename)
+    plt.close()
 
 
 def compare_loss(*folders, names=None):
@@ -178,16 +303,16 @@ def compare_loss(*folders, names=None):
 
     lines = plt.gca().get_lines()
     if names is None:
-        plt.legend(lines[:2], ['traihing loss', 'validation loss'])
+        plt.legend(lines[:2], ['training loss', 'validation loss'])
     else:
-        plt.legend(lines[:2] + lines[1::2], ['traihing loss', 'validation loss'] + names)
+        plt.legend(lines[:2] + lines[1::2], ['training loss', 'validation loss'] + names)
 
     plt.xlabel('Batch')
     plt.ylim([0,9e-4])
     plt.ylabel('Loss')
     plt.savefig('outputs/loss.png')
             
-
+@utils.set_seed
 def pred_test_sample(model, dataset, filename='outputs/sample_pred.png'):
 
     te_dl = DataLoader(dataset, batch_size=1, sampler=ValSampler(len(dataset), 10))
@@ -239,22 +364,13 @@ def shot_noise(x, pix_frac=.001):
 
 
 # ===== Metrics ===== #
-def compute_metric(pred, target, metric='MSE'):
+def compute_metric(pred, target, metric):
 
-    if metric.lower() == 'mse':
-        return mse(pred, target)
-    elif metric.lower() == 'rmse':
-        return rmse(pred, target)
-    elif metric.lower() == 'norm_mse':
-        return norm_mse(pred, target)
-    elif metric.lower() == 'dsc':
-        return dsc(pred, target)
-    elif metric.lower() == 'ssim':
-        return ssim(pred, target)
-    else:
-        raise ValueError(f"Unknown metric: '{metric}'")
-
-
+    metrics_fns = dict(map(lambda fn: (fn.__name__, fn), 
+                           [mse, rmse, norm_mse, dsc, ssim, psnr]))
+    
+    return metrics_fns[metric.lower()](pred, target)
+    
 def mse(x, y):
     """MSE loss x: image, y: target_image"""
 
@@ -347,5 +463,17 @@ def ssim(x, y):
     # structure = (cov_xy + c3) / (std_x*std_y + c3)
 
     # return luminance * contrast * structure
+
+def psnr(x, y, max_I=None):
+
+    def log_10(a): return np.log(a) /np.log(10)
+
+    if isinstance(x, torch.Tensor): x = x.cpu().squeeze(1).numpy()
+    if isinstance(y, torch.Tensor): y = y.cpu().squeeze(1).numpy()
+    
+    # Max value of target image
+    if max_I is None: max_I = y.max()
+
+    return 10 *log_10(max_I **2 /mse(x, y))
         
     
