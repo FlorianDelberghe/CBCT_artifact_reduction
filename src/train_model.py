@@ -2,6 +2,10 @@ import os
 import random
 from datetime import datetime
 
+
+from msd_pytorch import MSDRegressionModel
+from src.models import UNetRegressionModel
+
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -112,6 +116,29 @@ def train(model, dataloaders, loss_criterion, epochs, regularization=None, **kwa
     train_dl, val_dl = dataloaders
 
     optimizer = torch.optim.Adam(model.msd.parameters(), lr=kwargs.get('lr', 1e-3))
+
+    if isinstance(model, UNetRegressionModel):
+        optimizer = torch.optim.Adam([{'params': list(model.msd.inc.parameters()) + list(model.msd.down1.parameters()) + list(model.msd.down2.parameters()), 'lr':1e-6},
+                                    {'params': list(model.msd.down3.parameters()) + list(model.msd.down4.parameters()) + list(model.msd.up1.parameters()), 'lr':1e-5},
+                                    {'params': list(model.msd.up2.parameters()) + list(model.msd.up3.parameters()) + list(model.msd.up4.parameters()) + list(model.msd.outc.parameters()), 'lr':1e-4},
+                                    ])
+        
+    else:
+        params = list(model.msd.parameters())
+        if len(params) < 40:
+            optimizer = torch.optim.Adam([{'params': params[1:10], 'lr':1e-6},
+                                        {'params': [params[0]]+ params[10:20], 'lr':1e-5},
+                                        {'params': params[20:], 'lr':1e-4},
+                                        ])
+        else:
+            optimizer = torch.optim.Adam([{'params': params[1:20], 'lr':1e-6},
+                                        {'params': [params[0]]+ params[20:40], 'lr':1e-5},
+                                        {'params': params[40:], 'lr':1e-4},
+                                        ])
+
+    
+
+
     cutoff_epoch = kwargs.get('cutoff_epoch', 10)
     gamma =  kwargs.get('gamma', 1e-2 **(1/(epochs-cutoff_epoch)))
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
@@ -156,6 +183,9 @@ def train(model, dataloaders, loss_criterion, epochs, regularization=None, **kwa
                     loss_tracker.update(e*len(train_dl)+i+1, tr_loss, val_loss)
 
         if e+1 >= cutoff_epoch: scheduler.step()
+
+        if e % kwargs.get('save_interval', 1): continue
+
         loss_tracker.plot(filename=f'{save_folder}/training_losses.png',
                           xticks=[i*len(train_dl) for i in range(e+2)])
 
