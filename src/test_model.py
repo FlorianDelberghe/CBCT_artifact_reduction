@@ -21,8 +21,12 @@ from .utils import ValSampler, evaluate, imsave
 
 colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
+# ======================================= #
+# ============== Utilities ============== #
+# ======================================= #
 @contextmanager
 def set_rcParams(**kwargs):
+    """Temporarily sets plt params to get more readable figures"""
     
     plt_params = {'figure.figsize': (10,10),
                   'xtick.labelsize': 24,
@@ -49,7 +53,6 @@ def _to_iterable(obj):
         return obj
 
     return [obj]
-
 
 # ======================================= #
 # =============== Metrics =============== #
@@ -80,6 +83,7 @@ def eval_metrics(models, metrics_names, dataset, n_samples=50):
                           for metric in metrics for input_, target in dl]
                          ).reshape((len(metrics), n_samples)))
 
+    # dims = [models, metrics, samples]
     return np.stack(metrics_arrays, axis=0)
 
 def get_metrics_stats(metrics):
@@ -107,24 +111,35 @@ def plot_metrics_CV(metrics, model_names, metric_names, ref_metrics=None, filena
 
     if ref_metrics is not None:
         for i, name in enumerate(metric_names):
-            axes[i].plot([-.5, len(model_names)-.5], (ref_metrics[i],) *2, '--k', linewidth=4, alpha=.5)
+            axes[i].plot([-.5, len(model_names)+.5], (ref_metrics[i],) *2, '--k', linewidth=4, alpha=.5)
 
+    box_plot_handles = [None for _ in range(len(metrics))]
     for j in range(len(metrics)):
         for i, name in enumerate(metric_names):
-
-            axes[i].boxplot(metrics[j][:, i].T, positions=np.arange(len(metrics[j]))+(j-1)*.15, widths=.1,
-                            boxprops={'color': colors[j]}, whiskerprops={'color': colors[j]},
-                            capprops={'color': colors[j]}, medianprops={'color': 'k'})
+            
+            if i == 1:
+                box_plot_handles[j] = axes[i].boxplot(metrics[j][:, i].T, positions=np.array([0,1, 3,4,5,6])-.21+ j*.14, widths=.1,
+                                                    boxprops={'color': colors[j]}, whiskerprops={'color': colors[j]},
+                                                    capprops={'color': colors[j]}, medianprops={'color': 'k'},
+                                                    showfliers=False)["boxes"][0]
+            else:
+                axes[i].boxplot(metrics[j][:, i].T, positions=np.array([0,1, 3,4,5,6])+(j-1)*.15, widths=.1,
+                                boxprops={'color': colors[j]}, whiskerprops={'color': colors[j]},
+                                capprops={'color': colors[j]}, medianprops={'color': 'k'},
+                                showfliers=False)
 
             if j == len(metrics)-1:
                 axes[i].set_title(name)
-                axes[i].set_xticks(np.arange(len(metrics[j])))
+                axes[i].set_xticks(np.array([0,1, 3,4,5,6]))
                 axes[i].set_xticklabels(model_names, rotation=30)
 
+    # axes[1].legend(box_plot_handles, ['scratch', 'transfer', 'shuffle', 'mean-var'], loc='lower right')
+    axes[1].legend(box_plot_handles, ['16', '128', '1024', '~4900'], loc='lower right')
     plt.savefig(Path('outputs/') / filename)
         
 def get_metrics_table(metrics, models_names, metrics_names, stdout=None):
-    """metrics np.ndarray of shape [models, metrics, samples]"""
+    """metrics np.ndarray of shape [cv, models, metrics, samples]"""
+    
     print(metrics.shape)
     
     if stdout is not None:
@@ -137,183 +152,14 @@ def get_metrics_table(metrics, models_names, metrics_names, stdout=None):
 
     for i, metric in enumerate(metrics_names):
         print(f'{metric.upper():4s} & ', end='')
-        print(' & '.join([f'${metrics[j,i].mean():.4e} \\pm {metrics[j,i].std():.4e}$'
-                          for j in range(len(metrics))]), end=' \\\\\n')
+        print(' & '.join([f'${metrics[:,j,i].mean():.3f} \\pm {metrics[:,j,i].std():.3f}$'
+                          for j in range(len(models_names))]), end=' \\\\\n')
 
     print(r'\end{tabular}')
 
-
-def compute_metric_evolution(model, metrics, state_dicts, dataset, n_samples=50):
-
-    metrics_te = np.zeros((len(metrics), len(state_dicts)+1, n_samples))
-    state_dicts = (torch.load(state_dict, map_location='cpu') for state_dict in state_dicts)
-
-    dl = DataLoader(dataset, batch_size=1, sampler=ValSampler(len(dataset), n_samples), drop_last=False)
-
-    with evaluate(model):
-        metrics_te[:,0] = np.array([[compute_metric(model(input_), target, metric) for metric in metrics]
-                                   for input_, target in dl]).T
-
-        for i, state_dict in enumerate(state_dicts):
-            model.msd.load_state_dict(state_dict)
-
-            metrics_te[:,i+1] = np.array([[compute_metric(model(input_), target, metric) for metric in metrics]
-                                   for input_, target in dl]).T
-
-    return metrics_te
-
-
-# ======================================= #
-# ============ Representation =========== #
-# ======================================= #
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def noise_robustness(model, dataloader, noise='gaussian', **kwargs):
-    
-    if noise.lower() == 'gaussian':
-        noise_range = kwargs.get('noise_range', np.linspace(0, .05, 20, ))
-        add_noise = gauss_noise
-    elif noise.lower() == 'shot':
-        noise_range = kwargs.get('noise_range', np.linspace(0, .1, 20))
-        add_noise = shot_noise
-    else:
-        raise ValueError(f"Wrong noise argument: '{noise}'")
-
-    metrics = np.empty((3, len(noise_range)))
-    with evaluate(model):
-        for j in range(len(noise_range)):
-            metrics_ = np.empty((3, len(dataloader)))
-            for i, (input_, target) in enumerate(dataloader):
-
-                input_ = add_noise(input_, std=noise_range[j])
-                pred = model(input_)
-
-                metrics_[:,i] = mse(pred, target), ssim(pred, target), dsc(pred, target)             
-
-            metrics[:,j] = metrics_.mean(axis=1)
-
-    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-
-    fig, ax = plt.subplots(figsize=(10,10))
-    ax2 = ax.twinx()
-
-    line1 = ax.plot(noise_range, metrics[0], c=colors[0])
-    line2 = ax2.plot(noise_range, metrics[1], c=colors[1])
-    line3 = ax2.plot(noise_range, metrics[2], c=colors[2])
-
-    plt.legend(line1+line2+line3, ('MSE', 'SSIM', 'DSC'), loc='upper right')
-    ax.set_xlabel('Noise range')
-    ax.set_ylabel('Loss')
-    ax2.set_ylabel('Similarity Metrics')
-    ax.set_ylim([0, None])
-    ax2.set_ylim([0, 1])
-    ax2.yaxis.grid()
-    ax.set_title(kwargs.get('title', None))
-    plt.savefig('outputs/noise_robustness.png')
-    plt.close(fig)
-
-
-
-
-@set_rcParams()
-def plot_metrics_evolution(metrics, metrics_names, title=None, filename='outputs/metrics_evolution.png'):
-    global colors
-
-    fig, ax = plt.subplots(figsize=(10,10))
-    ax2 = ax.twinx()
-
-    xticks = np.arange(metrics.shape[1])
-    line1 = ax.plot(xticks, metrics[0].mean(1) *metrics[3].mean(1).max() /metrics[0].mean(1).max(), c=colors[0])
-    line2 = ax2.plot(xticks, metrics[1].mean(1), c=colors[1])
-    line3 = ax2.plot(xticks, metrics[2].mean(1), c=colors[2])
-    line4 = ax.plot(xticks, metrics[3].mean(1) , c=colors[3])
-
-    ax.fill_between(xticks, metrics[0].mean(1) -metrics[0].std(1), metrics[0].mean(1) +metrics[0].std(1), color=colors[0], alpha=.2)
-    ax.fill_between(xticks, metrics[3].mean(1) -metrics[3].std(1), metrics[3].mean(1) +metrics[3].std(1), color=colors[3], alpha=.2)
-    ax2.fill_between(xticks, metrics[1].mean(1) -metrics[1].std(1), metrics[1].mean(1) +metrics[1].std(1), color=colors[1], alpha=.2)
-    ax2.fill_between(xticks, metrics[2].mean(1) -metrics[2].std(1), metrics[2].mean(1) +metrics[2].std(1), color=colors[2], alpha=.2)
-    
-    plt.legend(line1+line2+line3+line4, metrics_names)
-    ax.set_xticks(xticks[::2])
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('MSE Loss')
-    ax2.set_ylabel('Similarity Metrics')
-    ax2.set_ylim([0,1])
-    ax2.set_yticks(np.linspace(0,1,11))
-    ax2.yaxis.grid()
-    ax.set_title(title)
-    plt.savefig(filename)
-    plt.close()
-
-
-def compare_loss(*folders, names=None):
-
-    # loss_files = [next(Path(folder).glob('losses.txt') ) for folder in folders]
-    loss_files = [next(folder.glob('losses.txt') ) for folder in folders]
-
-    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-    plt.figure(figsize=(15,15))
-
-    for i, loss_file in enumerate(loss_files):
-
-        with loss_file.open('rt') as f:
-            for j, line in enumerate(f):
-
-                loss_name = line.strip()
-                iters = list(map(int, next(f).strip().split(',')))
-                loss = list(map(float, next(f).strip().split(',')))
-
-                plt.plot(iters, loss, color=colors[i], label=loss_name, linestyle=['dashed', None][j%2])
-
-    lines = plt.gca().get_lines()
-    if names is None:
-        plt.legend(lines[:2], ['training loss', 'validation loss'])
-    else:
-        plt.legend(lines[:2] + lines[1::2], ['training loss', 'validation loss'] + names)
-
-    plt.xlabel('Batch')
-    plt.ylim([0,9e-4])
-    plt.ylabel('Loss')
-    plt.savefig('outputs/loss.png')
             
 @utils.set_seed
-def pred_test_sample(model, dataset, filename='outputs/sample_pred.png'):
+def pred_test_sample(model, dataset, filename='sample_pred.png'):
 
     te_dl = DataLoader(dataset, batch_size=1, sampler=ValSampler(len(dataset), 10))
       
@@ -321,17 +167,10 @@ def pred_test_sample(model, dataset, filename='outputs/sample_pred.png'):
         preds = torch.cat([torch.cat([sample, model(sample), truth], dim=-2)
                             for sample, truth in te_dl], dim=-1)
 
-    imsave(filename, preds.cpu().squeeze().numpy())
+    imsave(Path('outputs') / filename, preds.cpu().squeeze().numpy())
 
 
-def SVCCA_analysis(neurons, inputs):
-    pass
-
-
-# ===== Noise Functions ===== #
-# def add_noise(x, which='gaussian'):
-#     pass
-
+# ===== add noise to tensors ===== #
 
 def gauss_noise(x, mean=0, std=.1):
 
@@ -475,5 +314,3 @@ def psnr(x, y, max_I=None):
     if max_I is None: max_I = y.max()
 
     return 10 *log_10(max_I **2 /mse(x, y))
-        
-    

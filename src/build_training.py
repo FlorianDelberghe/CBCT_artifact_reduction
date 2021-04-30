@@ -325,7 +325,7 @@ def get_usb_phantom():
         yield input_volume
 
 
-def build_phantom_dataset(input_volume, save_folder, scaling=1, gpu_id=0):
+def build_phantom_dataset(input_volume, save_folder, scaling=1, gpu_id=1):
 
     scanner_params = FleX_ray_scanner()
     scanner_trajs = [astra_sim.create_scan_geometry(scanner_params, n_projs=1200, elevation=el) for el in [-15, 0, 15]]
@@ -337,45 +337,51 @@ def build_phantom_dataset(input_volume, save_folder, scaling=1, gpu_id=0):
     max_in_dim = max(input_volume.shape)
 
     # Creates grid center on volume center regardless of volume shape
-    z_gr = np.linspace(-input_volume.shape[0] /interp_shape[0] /max_in_dim *501 *scaling,
-                        input_volume.shape[0] /interp_shape[0] /max_in_dim *501 *scaling,
-                        input_volume.shape[0])
-    x_gr, y_gr = [np.linspace(-input_volume.shape[j] /interp_shape[1] /max_in_dim *501 *scaling,
-                                input_volume.shape[j] /interp_shape[1] /max_in_dim *501 *scaling,
-                                input_volume.shape[j]) for j in range(1,3)]
+    # z_gr = np.linspace(-input_volume.shape[0] /interp_shape[0] /max_in_dim *501 *scaling,
+    #                     input_volume.shape[0] /interp_shape[0] /max_in_dim *501 *scaling,
+    #                     input_volume.shape[0])
+    # x_gr, y_gr = [np.linspace(-input_volume.shape[j] /interp_shape[1] /max_in_dim *501 *scaling,
+    #                             input_volume.shape[j] /interp_shape[1] /max_in_dim *501 *scaling,
+    #                             input_volume.shape[j]) for j in range(1,3)]
 
-    interp = RegularGridInterpolator((z_gr, x_gr, y_gr), input_volume, fill_value=0, bounds_error=False)
+    # interp = RegularGridInterpolator((z_gr, x_gr, y_gr), input_volume, fill_value=0, bounds_error=False)
 
-    z_gr = np.linspace(-1.0, 1.0, interp_shape[0])
-    xy_gr = np.linspace(-1.0, 1.0, interp_shape[1])
+    # z_gr = np.linspace(-1.0, 1.0, interp_shape[0])    
+    # xy_gr = np.linspace(-1.0, 1.0, interp_shape[1])
 
-    z_rad = np.vstack((z_gr,) *interp_shape[1]).T
+    # z_rad = np.vstack((z_gr,) *interp_shape[1]).T
 
     save_folder.mkdir(parents=True, exist_ok=True)
 
-    for j in trange(len(theta_range), desc=f"Saving {save_folder.name}/CT_target"):
-        x_rad = np.vstack((xy_gr * np.cos(theta_range[j]),) *interp_shape[0])
-        y_rad = np.vstack((xy_gr * -np.sin(theta_range[j]),) *interp_shape[0])
+    # for j in trange(len(theta_range), desc=f"Saving {save_folder.name}/CT_target"):
+    #     x_rad = np.vstack((xy_gr * np.cos(theta_range[j]),) *interp_shape[0])
+    #     y_rad = np.vstack((xy_gr * -np.sin(theta_range[j]),) *interp_shape[0])
 
-        rad_slices_input = interp(np.vstack((z_rad.flatten(), x_rad.flatten(), y_rad.flatten())).T
-                                    ).reshape(interp_shape)
+    #     rad_slices_input = interp(np.vstack((z_rad.flatten(), x_rad.flatten(), y_rad.flatten())).T
+    #                                 ).reshape(interp_shape)
 
-        imsave((save_folder/ f'CT_target_s{j+1:0>4d}.tif'), rad_slices_input.astype('float32'))
-    print('')
+    #     imsave((save_folder/ f'CT_target_s{j+1:0>4d}.tif'), rad_slices_input.astype('float32'))
+    # print('')
+    # return 
 
     # Voxel size for whole cube volume within scan FoV
     vox_sz = scanner_params.source_origin_dist /(scanner_params.source_detector_dist /min(scanner_params.FoV) +.5) /max_in_dim
 
-    for i, scanner_traj in enumerate(scanner_trajs):
+    for i, scanner_traj in enumerate(scanner_trajs):    
         projections = astra_sim.create_CB_projection(input_volume, scanner_params, proj_vecs=scanner_traj, voxel_size=vox_sz *scaling, gpu_id=gpu_id)
-        utils.save_vid(f'outputs/projections.avi', projections[...,None])
+
+        projections = -np.log( np.random.poisson(np.exp(-projections) *1.3e4 +3) /1.3e4)
+
+        # projections = (projections -np.log( np.random.poisson(np.exp(-projections) *1.3e4) /1.3e4)) /2
+
         reconstructed_volume = astra_sim.FDK_reconstruction(projections, scanner_params, proj_vecs=scanner_traj, voxel_size=vox_sz *max_in_dim/501, gpu_id=gpu_id)
 
-        rad_slices_CB = radial_slice_sampling(reconstructed_volume, theta_range)
-        
+        rad_slices_CB = radial_slice_sampling(reconstructed_volume, theta_range)        
+
         for j in trange(len(theta_range), desc=f"Saving {save_folder.name}/CB_source_orbit{i+1:0>2d}"):    
             imsave(save_folder / f'CB_source_orbit{i+1:0>2d}_s{j+1:0>4d}.tif', rad_slices_CB[j])
         print('')
+    
 
 
 def build_abdo_dataset(gpu_id=0):
@@ -479,7 +485,7 @@ def build_abdo_dataset(gpu_id=0):
 
 if __name__ == '__main__':
 
-    save_folders = [Path(f'/data/fdelberghe/PhantomsRadialSmall/Phantom{i}') for i in range(1,8)]
+    save_folders = [Path(f'/data/fdelberghe/PhantomsRadialNoisy/Phantom{i}') for i in range(1,8)]
     for ct_volume, save_folder in zip(get_usb_phantom(), save_folders):
         build_phantom_dataset(ct_volume, save_folder, scaling=.8)
     

@@ -90,8 +90,14 @@ def _load_natural_image(path):
 
 
 class ImageTransform():
+    """Superclass for transform to apply to images during training"""
 
     def __init__(self, name, p):
+        """
+            Args:
+            -----
+            p (float): probability to apply the transform
+        """
         self.name = name
         self.p = p
 
@@ -102,6 +108,7 @@ class ImageTransform():
         raise NotImplementedError("Virtual class to be implemented in daughter classes")
 
 class TransformList():
+    """List of transforms to be applied in order"""
 
     def __init__(self, transforms):
         self.transforms = transforms
@@ -131,6 +138,7 @@ class GaussianNoise(ImageTransform):
             return image, target
 
         with torch.no_grad():
+            # applies transform selectively to input, output or both images
             if self.which == 'input':
                 return self.add_noise(image), target
 
@@ -143,6 +151,7 @@ class GaussianNoise(ImageTransform):
             raise ValueError()
 
 class PoissonNoise(ImageTransform):
+
     def __init__(self, p=1., which='input'):
         super().__init__(name='PoissonNoise', p=p)
 
@@ -150,6 +159,7 @@ class PoissonNoise(ImageTransform):
         self.which = which
         
     def add_noise(self, t):
+        # clip to [0, +inf) as density/ attenuation can only be positive
         return Poisson(t.clamp(0, None).mul(self.scaling)).sample().div(self.scaling)
 
     def transform(self, image, target):
@@ -171,6 +181,7 @@ class PoissonNoise(ImageTransform):
 
 
 class RandomVFlip(ImageTransform):
+    """Transform to flip images arounf the vertical axis"""
 
     def __init__(self, p=.5):
         super().__init__(name='RandomVFlip', p=p)
@@ -182,6 +193,7 @@ class RandomVFlip(ImageTransform):
         return image, target
 
 class RandomHFlip(ImageTransform):
+    """Transform to flip images arounf the horizontal axis"""
 
     def __init__(self, p=.5):
         super().__init__(name='RandomHFlip', p=p)
@@ -191,30 +203,6 @@ class RandomHFlip(ImageTransform):
             return torch.flip(image, (-2,)), torch.flip(target, (-2,))
 
         return image, target
-
-
-# def data_augmentation(func):
-#     """__getitem__() decorator to add ability to augment the data"""
-
-#     def random_flip(*ts, p=0):
-#         """Random flip along one of the image axis Y with p"""
-        
-#         if p > .5:
-#             return tuple(map(lambda t: torch.flip(t, (-2,)), ts))      
-
-#         return ts            
-                
-#     def _data_aug(self, *args, **kwargs):
-
-#         if not self.data_augmentation:
-#             return func(self, *args, **kwargs)
-
-#         image, target = func(self, *args, **kwargs)
-#         # return self.image_transform(image, target)
-
-#         return random_flip(*(image, target), p=random.random()*self.data_augmentation)        
-
-#     return _data_aug
 
 
 class ImageStack(object):
@@ -365,8 +353,6 @@ class ImageDataset(Dataset):
         input_paths,  
         target_paths, 
         device=None,
-        # collapse_channels=False,
-        # labels=None,
         transforms=None
     ):
         """Create a new image dataset.
@@ -417,8 +403,6 @@ class ImageDataset(Dataset):
 
         self.input_paths = input_paths
         self.target_paths = target_paths
-        # self.collapse_channels = collapse_channels
-        # self.labels = labels
         self.transforms = transforms
 
         if device is None:
@@ -426,9 +410,6 @@ class ImageDataset(Dataset):
         else:
             self.device = device
 
-        # Do not collapse channels in the target images when we do
-        # segmentation. This is not supported.
-        # collapse_target = collapse_channels and labels is None
         self.input_stack = ImageStack(input_paths)
         self.target_stack = ImageStack(target_paths)
 
@@ -485,6 +466,7 @@ class MultiOrbitDataset(Dataset):
         else:
             self.device = device
 
+        # mirrors slices since dataset only covers [0, np.pi[
         self.vert_symetry = RandomVFlip(p=.5) if vert_sym else None
         self.transforms = transforms
         
@@ -508,7 +490,6 @@ class MultiOrbitDataset(Dataset):
     def __len__(self):
         return len(self.target_stack)
 
-    # @data_augmentation
     def __getitem__(self, i):
         # Imports input image from a random or chosen orbit height  
         input_img, target_img = \

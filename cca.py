@@ -1,13 +1,8 @@
-import argparse
-import glob
-import os
-import random
-import sys
-from datetime import datetime
-from typing import Iterable, List, Tuple
+from tqdm import trange, tqdm
 
 import numpy as np
 import torch
+from matplotlib import cm
 from msd_pytorch import MSDRegressionModel
 from torch import nn
 from torch.utils.data import DataLoader
@@ -16,16 +11,22 @@ import src.utils as utils
 from src.image_dataset import MultiOrbitDataset
 from src.models import UNetRegressionModel
 from src.train_model import *
+from src.test_model import set_rcParams
+from src.transfer_model import shuffle_weights, mean_var_init
 from src.utils import ValSampler, _nat_sort
 from SVCCA import cca_core
 from SVCCA.pwcca import compute_pwcca
 
+""""Uses code based on https://arxiv.org/abs/1706.05806, https://github.com/google/svcca"""
+
 
 class MSDForwardLogger():
+    """Logs forward propagated activation maps in MS-D Nets"""
 
     def __init__(self, layers, n_samples, sample_rate):
         self.layers = layers
         self._representation = torch.zeros(len(layers), n_samples *sample_rate **2, device='cuda')
+        # number of samples per dimension for each activation map, gathers sample_rate^2 per neuron activation (2D)
         self.sample_rate = sample_rate
         self.current_ind = 0
     
@@ -37,9 +38,12 @@ class MSDForwardLogger():
         self.current_ind += len(layer_out) *self.sample_rate **2
 
     def get_representation(self, group_sz=5):
+        """Return representation of all layers to be used for cca analysis"""
         return [self._representation[i:i+group_sz].cpu().numpy() for i in range(0, len(self._representation), group_sz)]
 
+
 class UNetForwardLogger():
+    """Logs forward propagated activation maps in UNets"""
 
     def __init__(self, layers, n_samples, sample_rate):
         # (layers, channels, samples)
@@ -68,10 +72,12 @@ class UNetForwardLogger():
         self.current_ind[layer_ind] += len(layer_out) *self.sample_rate **2
 
     def get_representation(self):
+        """Return representation of all layers to be used for cca analysis"""
         return [rep.cpu().numpy() for rep in self._representation]
 
 
 def hook_MSD(model, layers, n_samples, sample_rate):
+    """Hooks logger to the forward method of the layers"""
 
     def hook_closure(layers, logger):
         def hook_fn(self, input_, output):
@@ -90,6 +96,7 @@ def hook_MSD(model, layers, n_samples, sample_rate):
     return msd_logger
 
 def hook_UNet(model, layers, n_samples, sample_rate):
+    """Hooks logger to the forward method of the layers"""
 
     def hook_closure(layer, layer_ind, logger):
         def hook_fn(self, input_, output):
@@ -133,30 +140,38 @@ def get_model_representation(models, patches, layers, sample_rate=10):
     return  [logger.get_representation() for logger in loggers]
 
 
-def get_patches(dataset, n_patches=100, batch_size=8) -> Iterable[torch.Tensor]: 
+def get_patches(dataset, n_patches=100, batch_size=8): 
 
     return DataLoader(dataset, batch_size, sampler=ValSampler(len(dataset), n_patches), drop_last=False)
 
-    
-def get_layers(model): return [model.msd.inc,
-                               model.msd.down1, model.msd.down2, model.msd.down3, model.msd.down4,
-                               model.msd.up1, model.msd.up2, model.msd.up3, model.msd.up4,
-                            #    model.msd.outc
-                               ]
+
+def get_unet_layers(model):
+    """UNet layers to be hooked"""
+
+    return [model.msd.inc,
+            model.msd.down1, model.msd.down2, model.msd.down3, model.msd.down4,
+            model.msd.up1, model.msd.up2, model.msd.up3, model.msd.up4,
+            ]
 
 
 def get_svcca_matrix(reps1, reps2, max_dims=None):
+    """Computes the SVCCA similarity matrix for reps1 and reps2"""
 
     cca_matrix = np.zeros((len(reps1), len(reps2)))
 
     for i, rep1 in enumerate(reps1):
         for j, rep2 in enumerate(reps2):
-            n_dims = min(len(rep1), len(rep2)) if max_dims is not None else min(max_dims, min(len(rep1), len(rep2)))
+            # dimensionality used for the computation
+            n_dims = min(len(rep1), len(rep2)) if max_dims is None else min(max_dims, min(len(rep1), len(rep2)))
 
             rep1, rep2 = rep1 -rep1.mean(axis=1, keepdims=True), rep2 -rep2.mean(axis=1, keepdims=True)
 
             U1, s1, V1 = np.linalg.svd(rep1, full_matrices=False)
             U2, s2, V2 = np.linalg.svd(rep2, full_matrices=False)
+
+            # use directions that explain 99% of variance
+            explained_var = max( ((s1 **2 / (s1**2).sum()) > .01).sum(), ((s2 **2 / (s2**2).sum()) > .01).sum() )
+            n_dims = min(n_dims, int(explained_var))
 
             svacts1 = np.dot(s1[:n_dims]*np.eye(n_dims), V1[:n_dims])
             # can also compute as svacts1 = np.dot(U1.T[:20], cacts1)
@@ -169,14 +184,14 @@ def get_svcca_matrix(reps1, reps2, max_dims=None):
     return cca_matrix
     
 
-def get_pwcca_dist(reps1, reps2, *, xlabel=None, ylabel=None, xticklabels=None, title=None, **kwargs):
+def get_pwcca_dist(reps1, reps2):
+    """Computes the PWCCA distance for reps1 and reps2"""
+    
     assert len(reps1) == len(reps2)
     
     pwcca_dists = np.zeros(len(reps1))
 
     for i, (rep1, rep2) in enumerate(zip(reps1, reps2)):
-
-            n_dims = min(len(rep1), len(rep2))
 
             rep1, rep2 = rep1 -rep1.mean(axis=1, keepdims=True), rep2 -rep2.mean(axis=1, keepdims=True)
 
@@ -184,110 +199,3 @@ def get_pwcca_dist(reps1, reps2, *, xlabel=None, ylabel=None, xticklabels=None, 
             pwcca_dists[i] = 1-pwcca_coef
 
     return pwcca_dists
-
-
-if __name__ == '__main__':
-
-    GPU_ID = 1
-    if 'CUDA_VISIBLE_DEVICES' not in os.environ.keys():
-            torch.cuda.set_device(globals().get('GPU_ID', -1))
-
-    print(f"Running on GPU: {torch.cuda.current_device()}, {torch.cuda.get_device_name(torch.cuda.current_device())}", 
-        flush=True)
-
-    model_params = {'c_in': 1, 'c_out': 1, 'depth': 80, 'width': 1,
-                    'dilations': [1, 2, 4, 8, 16], 'loss': 'L2'}
-
-    target_ims, input_ims = utils.load_phantom_ds()
-    cv_split_generator = utils.split_data_CV(input_ims, target_ims, frac=(1/7, 2/7))
-
-    (test_set, val_set, train_set) = next(cv_split_generator)
-    train_ds = MultiOrbitDataset(*train_set, device='cuda')
-    val_ds = MultiOrbitDataset(*val_set, device='cuda')
-    test_ds = MultiOrbitDataset(*test_set, device='cuda')
-
-    fig, ax = plt.subplots()
-    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-
-    # model_params['width'] = 32
-    models = [MSDRegressionModel(**model_params) for _ in range(6)]
-
-    [model.set_normalization(DataLoader(test_ds, batch_size=100, sampler=ValSampler(len(test_ds), min(len(test_ds), 2000))))
-        for model in models]
-
-    [model.msd.load_state_dict(
-        torch.load(sorted(glob.glob(f'model_weights/MSD_phantoms/MSD_d80_P_scratch_CV{cv}*/model*.h5'), key=_nat_sort)[0], map_location='cpu'))
-        for cv, model in zip(['01', '03', '05'], models[:3])]
-    [model.msd.load_state_dict(
-        torch.load(sorted(glob.glob(f'model_weights/MSD_phantoms/MSD_d80_P_transfer_CV01_CV{cv}*/model*.h5'), key=_nat_sort)[0], map_location='cpu'))
-        for cv, model in zip(['01', '03', '05'], models[3:])]
-
-    layers = [range(1,81) for model in models]
-
-    reps = get_model_representation(models, get_patches(test_ds, 10), layers, n_samples=10, sample_rate=10)[0]
-
-    ax.plot(get_pwcca_dist(reps[0], reps[1]))
-    sys.exit()
-
-
-    # dists_scratch = np.stack([get_pwcca_dist(reps[0], reps[1]),
-    #                   get_pwcca_dist(reps[1], reps[2]),
-    #                   get_pwcca_dist(reps[0], reps[2])], axis=0)
-
-    # dists_transfer = np.stack([get_pwcca_dist(reps[3], reps[4]),
-    #                   get_pwcca_dist(reps[4], reps[5]),
-    #                   get_pwcca_dist(reps[3], reps[5])], axis=0)
-
-    # ax.plot(dists_scratch.mean(0), label=f'UNet_f8 (scratch) ', c=colors[0])
-    # ax.fill_between(range(dists_scratch.shape[1]), 
-    #                     dists_scratch.mean(0) -dists_scratch.std(0),
-    #                     dists_scratch.mean(0) +dists_scratch.std(0), color=colors[0], alpha=.2)
-
-    # ax.plot(dists_transfer.mean(0), label=f'UNet_f8 (transfer)', c=colors[1])
-    # ax.fill_between(range(dists_transfer.shape[1]), 
-    #                     dists_transfer.mean(0) -dists_transfer.std(0),
-    #                     dists_transfer.mean(0) +dists_transfer.std(0), color=colors[1], alpha=.2)
-
-    dists_CV = np.stack([get_pwcca_dist(reps[0], reps[3]),
-                        get_pwcca_dist(reps[1], reps[4]),
-                        get_pwcca_dist(reps[2], reps[5])], axis=0)
-
-    for i in range(3):
-        ax.plot(dists_CV[i], label=f'CV{i*2+1:0>d}', c=colors[i])
-        # ax.fill_between(range(dists_CV.shape[1]), 
-        #                     dists_CV.mean(0) -dists_CV.std(0),
-        #                     dists_CV.mean(0) +dists_CV.std(0), color=colors[i], alpha=.2)
-
-    #            
-    # for i, d in enumerate([16, 32, 64]):   
-    #     model_params['width'] = d
-    #     models = [UNetRegressionModel(**model_params) for _ in range(3)]
-
-    #     [model.set_normalization(DataLoader(test_ds, batch_size=100, sampler=ValSampler(len(test_ds), min(len(test_ds), 2000))))
-    #      for model in models]
-
-    #     [model.msd.load_state_dict(
-    #         torch.load(sorted(glob.glob(f'model_weights/UNet_baseline/UNet_f{d}_W_CV{cv}*/best*.h5'), key=_nat_sort)[-1], map_location='cpu'))
-    #         for cv, model in zip(['01', '13', '25'], models)]
-            
-    #     layers = [get_layers(model) for model in models]
-    #     # layers = [range(1,d+1) for _ in models]T
-
-    #     reps = get_model_representation(models, test_ds, layers, n_samples=10, sample_rate=10)
-
-    #     dists = np.stack([get_pwcca_dist(reps_f8[0], reps[0],),
-    #                       get_pwcca_dist(reps_f8[0], reps[1],),
-    #                       get_pwcca_dist(reps_f8[0], reps[2],)], axis=0)
-
-    #     ax.plot(dists.mean(0), c=colors[i], label=f'UNet_f{d}')
-    #     ax.fill_between(range(dists.shape[1]), 
-    #                        dists.mean(0) -dists.std(0),
-    #                        dists.mean(0) +dists.std(0), color=colors[i], alpha=.2)
-            
-    ax.set_xlabel('Layers')
-    ax.set_xticks(range(9))
-    ax.set_xticklabels(['inconv', 'down1', 'down2', 'down3', 'down4', 'up1', 'up2', 'up3', 'up4'], rotation=30)
-    ax.set_ylabel('PWCCA distance')
-    plt.legend()
-    plt.savefig('outputs/PWCCA.png')
-    plt.close() 
