@@ -58,8 +58,12 @@ def rescale_before_saving(func):
 
         im = kwargs.pop('im', kwargs.pop('ims', args[1]))
         uri = kwargs.pop('uri', args[0])
-
-        if uri.split('.')[-1] in ['tif', 'tiff']:
+        
+        if isinstance(uri, PurePath):
+            if uri.suffix in ['.tif', '.tiff']:
+                return func(uri, im, **kwargs)
+        
+        elif uri.split('.')[-1] in ['tif', 'tiff']:
             return func(uri, im, **kwargs)
 
         # Normalizing to [0,1] then rescaling to uint
@@ -137,24 +141,11 @@ def timeit(func):
         return return_values
 
     return timeit_wrapper
-
-
-@contextmanager
-def evaluate(*models):
-    """Context manager to evaluate models disables grad computation and sets models to eval"""
-
-    try:
-        torch.set_grad_enabled(False)
-        [model.eval() for model in models]
-        yield None
-
-    finally:
-        torch.set_grad_enabled(True)
-        [model.train() for model in models]
     
 
 #TODO: unit test for _nat_sort
 def _nat_sort(path):
+    """Natural sorting of paths, [0,1,10,2] -> [0,1,2,10]"""
     if isinstance(path, PurePath):
         return [int(c) if c.isdigit() else c for c in re.split("([0-9]+)", path.as_posix())]
     
@@ -217,9 +208,11 @@ def set_seed(func):
 
 @set_seed
 def split_data(input_ims, target_ims, frac=7/42, verbose=True):
+    """Splits data into train, val and test sets, as list(tuple(input, target))"""
 
     n_test = n_val = max(1, int(np.round(len(target_ims) *frac)))
     
+    # shuffle order of (input, target) pairs
     zipped_ims = random.sample([
         (i, input_im, target_im) for i, (input_im, target_im) in enumerate(zip(input_ims, target_ims))
     ], len(target_ims))
@@ -235,6 +228,7 @@ def split_data(input_ims, target_ims, frac=7/42, verbose=True):
 
 @set_seed
 def split_data_CV(input_ims, target_ims, frac=1/4, verbose=True):
+    """Creates a generator for data split for cross validation, yields train, val and test sets, as list(tuple(input, target))"""
     
     if isinstance(frac, (tuple, list)):
         n_test = int(np.round(len(target_ims) *frac[0]))
@@ -243,6 +237,7 @@ def split_data_CV(input_ims, target_ims, frac=1/4, verbose=True):
     else:
         n_test = n_val = max(1, int(np.round(len(target_ims) *frac)))
 
+    # shuffle order of (input, target) pairs
     zipped_ims = random.sample([
         (i, input_im, target_im) for i, (input_im, target_im) in enumerate(zip(input_ims, target_ims))
     ], len(target_ims))
@@ -264,34 +259,3 @@ def split_data_CV(input_ims, target_ims, frac=1/4, verbose=True):
             print(f"Sample indices for test: {ids_te}, validation: {ids_val}, training: {ids_tr}")
 
         yield test_set, val_set, train_set
-
-
-class ValSampler(torch.utils.data.Sampler):
-    """Samplers to avoid going through the entire validation dataset each time"""
-        
-    def __init__(self, dataset_len, n_samples=100, fixed_samples=True):
-        self.dataset_len = dataset_len
-        self.n_samples = int(dataset_len *n_samples) if 0 < n_samples <= 1 else n_samples
-        self.fixed_samples = fixed_samples
-        
-        # Returns the same samples for every iter
-        if fixed_samples:
-            self.samples = random.sample(range(self.dataset_len), self.n_samples)
-
-    def __len__(self):
-        return self.n_samples
-
-    def __iter__(self):
-        if self.fixed_samples:
-            return iter(self.samples)
-            
-        return iter(random.sample(range(self.dataset_len), self.n_samples))
-
-
-class BatchSampler(torch.utils.data.Sampler):
-
-    def __init__(self, dataset, sub_sampling):
-        raise NotImplementedError
-
-
-

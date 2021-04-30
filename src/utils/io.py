@@ -13,7 +13,7 @@ def load_projections(walnut_path, orbit_id, angular_sub_sampling=1):
     """Loads all CB projections from one walnut/orbit pair with associated info for reconstruction"""
 
     def flip_trans(image):
-        """Re-orients projections correctly"""
+        """Re-orients projections"""
         return np.transpose(np.flipud(image))
 
 
@@ -90,7 +90,6 @@ def save_vid(filename, image_stack, codec='MJPG', fps=30, **kwargs):
     # Rescale for video compatible format
     if not image_stack.dtype is np.uint8:
         image_stack = ((image_stack-image_stack.min()) / (image_stack.max()-image_stack.min()) *255).astype('uint8')
-        # image_stack = np.clip(image_stack *255, 0,255).astype('uint8')
 
     for i in range(image_stack.shape[0]):
         if image_stack.shape[-1] == 1:

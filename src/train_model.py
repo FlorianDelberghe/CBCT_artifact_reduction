@@ -90,9 +90,50 @@ class MetricsLogger():
                 f.write(','.join(list(map(lambda m: f'{m:.7f}', metric))) +' \n')
 
 
-def train(model, dataloaders, loss_criterion, epochs, regularization=None, **kwargs):
+def get_optimizer(model, lr, transfer_optim):
+    """Initializes optimizer depending on training setup"""
+
+    # different otpimizer lr for transfer to reuse low level features
+    if transfer_optim:
+        if isinstance(model, UNetRegressionModel):
+            optimizer = torch.optim.Adam([{'params':
+                                           list(model.msd.inc.parameters()) +
+                                           list(model.msd.down1.parameters()) +
+                                           list(model.msd.down2.parameters()), 'lr': 1e-6},
+                                          {'params': 
+                                           list(model.msd.down3.parameters()) +
+                                           list(model.msd.down4.parameters()) +
+                                           list(model.msd.up1.parameters()), 'lr': 1e-5},
+                                          {'params': 
+                                           list(model.msd.up2.parameters()) + list(model.msd.up3.parameters()) +
+                                           list(model.msd.up4.parameters()) + list(model.msd.outc.parameters()), 'lr': 1e-4},
+                                          ])
+
+        else:
+            params = list(model.msd.parameters())
+            # case: MSD_d30
+            if len(params) < 40:
+                optimizer = torch.optim.Adam([{'params': params[1:10], 'lr':1e-6},
+                                            {'params': params[:0]+ params[10:20], 'lr':1e-5},
+                                            {'params': params[20:], 'lr':1e-4},
+                                            ])
+            # case: MSD_d80
+            else:
+                optimizer = torch.optim.Adam([{'params': params[1:20], 'lr':1e-6},
+                                            {'params': params[:0]+ params[20:40], 'lr':1e-5},
+                                            {'params': params[40:], 'lr':1e-4},
+                                        ])
+    else:
+        optimizer = torch.optim.Adam(model.msd.parameters(), lr)
+
+    return optimizer
+
+
+def train(model, dataloaders, loss_criterion, epochs, regularization=None, transfer_optim=False, **kwargs):
 
     def save_val_sample_pred(dataloader, n_samples=10):
+        """Samples a few data points to evaluate during training"""
+
         sample_ids = random.sample(range(len(dataloader.dataset)), n_samples)
 
         def pred_samples(model, filename):           
@@ -114,31 +155,10 @@ def train(model, dataloaders, loss_criterion, epochs, regularization=None, **kwa
     print(f"Saving to {save_folder}", flush=True)
 
     train_dl, val_dl = dataloaders
-
-    optimizer = torch.optim.Adam(model.msd.parameters(), lr=kwargs.get('lr', 1e-3))
-
-    if isinstance(model, UNetRegressionModel):
-        optimizer = torch.optim.Adam([{'params': list(model.msd.inc.parameters()) + list(model.msd.down1.parameters()) + list(model.msd.down2.parameters()), 'lr':1e-6},
-                                    {'params': list(model.msd.down3.parameters()) + list(model.msd.down4.parameters()) + list(model.msd.up1.parameters()), 'lr':1e-5},
-                                    {'params': list(model.msd.up2.parameters()) + list(model.msd.up3.parameters()) + list(model.msd.up4.parameters()) + list(model.msd.outc.parameters()), 'lr':1e-4},
-                                    ])
-        
-    else:
-        params = list(model.msd.parameters())
-        if len(params) < 40:
-            optimizer = torch.optim.Adam([{'params': params[1:10], 'lr':1e-6},
-                                        {'params': [params[0]]+ params[10:20], 'lr':1e-5},
-                                        {'params': params[20:], 'lr':1e-4},
-                                        ])
-        else:
-            optimizer = torch.optim.Adam([{'params': params[1:20], 'lr':1e-6},
-                                        {'params': [params[0]]+ params[20:40], 'lr':1e-5},
-                                        {'params': params[40:], 'lr':1e-4},
-                                        ])
-
+ 
+    optimizer = get_optimizer(model, kwargs.get('lr', 1e-3), transfer_optim)
     
-
-
+    # sets up the exponetially decreasing LR from 'cutoff_epoch' to the last one
     cutoff_epoch = kwargs.get('cutoff_epoch', 10)
     gamma =  kwargs.get('gamma', 1e-2 **(1/(epochs-cutoff_epoch)))
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
@@ -207,8 +227,3 @@ def train(model, dataloaders, loss_criterion, epochs, regularization=None, **kwa
                 'scheduler': scheduler
                 },
                f"{save_folder}/end_training.h5")
-
-
-def cross_validation_train():
-    """Trains model with cross validation to validate stability/robustness"""
-    pass

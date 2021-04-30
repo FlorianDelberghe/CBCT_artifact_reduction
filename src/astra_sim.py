@@ -13,7 +13,10 @@ class CTScanner():
         -----
             detector_size (tuple): n_pixels of detector, (rows, columns)
             pixel_size (tuple, int): size of pixels int (square) or tuple if rectangular
-            bin_factor (int): binning of the detector pixels"""
+            bin_factor (int): binning of the detector pixels
+            source_origin_dist (float): distance from X-ray source to the center of the scanned object
+            source_detector_dist (float): distance from X-ray source to the center of the detector
+            """
 
     def __init__(self, name,
                  detector_size, pixel_size, bin_factor, source_origin_dist, source_detector_dist, **kwargs):
@@ -49,7 +52,8 @@ class FleX_ray_scanner(CTScanner):
         self.FoV = tuple(map(lambda p,d: p*d, self.pixel_effective_size , self.detector_effective_size))
 
 class SiemensCT(CTScanner):
-    """Siemens CT scanner from LDCT dataset (https://wiki.cancerimagingarchive.net/pages/viewpage.action?pageId=52758026)"""
+    """Siemens CT scanner from LDCT dataset (https://wiki.cancerimagingarchive.net/pages/viewpage.action?pageId=52758026)
+        non-square pixels, cylindrical detector"""
 
     def __init__(self, name=None,
                  detector_size=(64, 736),
@@ -86,7 +90,7 @@ def create_scan_geometry(scan_params, n_projs, elevation=0.):
 
         Returns:
         --------
-            vecs (np.ndarray): projection vectors characterizing the scan goemetry
+            vecs (np.ndarray): projection vectors caracterizing the scan geometry
     """
         
     scan_angles = np.linspace(0, 2*np.pi, n_projs, endpoint=False)
@@ -114,24 +118,23 @@ def create_scan_geometry(scan_params, n_projs, elevation=0.):
 
 
 @timeit
-def create_CB_projection(ct_volume, scanner_params, proj_vecs, voxel_size=.1, **kwargs):
+def create_CB_projection(ct_volume, scanner_params, proj_vecs, voxel_size=.1, gpu_id=-1):
     """
         Args:
         -----
             ct_volume (np.ndarray): [z,x,y] axis order at import
-            scanner_params (class): scanner class to get relevant metadata from
+            scanner_params (class): scanner class to get relevant metadata 
             proj_vecs (np.ndarray): vecs of the scan trajectory
             voxel_size (float): voxel size in mm
 
             --optional--
-            gpu_id (int): GPU to run astra on, can be set in globals(), defaults twqo -1 otherwise
-
+            gpu_id (int): GPU to run astra on, can be set in globals()
         Returns:
         --------
-            projections (np.ndarray): projection data
+            projections (np.ndarray): projection data [proj_slc, rows, cols]
     """
 
-    astra.astra.set_gpu_index(globals().get('GPU_ID', kwargs.get('gpu_id', -1)))
+    astra.astra.set_gpu_index(globals().get('GPU_ID', gpu_id))
     
     # [y,x,z] axis order for size, [x,y,z] for volume shape, why...?
     vol_geom = astra.creators.create_vol_geom(*np.transpose(ct_volume, (1,2,0)).shape,
@@ -154,7 +157,7 @@ def create_CB_projection(ct_volume, scanner_params, proj_vecs, voxel_size=.1, **
 
 
 @timeit
-def FDK_reconstruction(projections, scanner_params, proj_vecs, voxel_size=.1, rec_shape=501, vol_center=0, **kwargs):
+def FDK_reconstruction(projections, scanner_params, proj_vecs, voxel_size=.1, rec_shape=501, vol_center=0, gpu_id=-1):
     """Uses FDK method to reconstruct CT volume from CB projections
         
         Args:
@@ -164,16 +167,17 @@ def FDK_reconstruction(projections, scanner_params, proj_vecs, voxel_size=.1, re
             proj_vecs (np.ndarray): vects describing the scanning used for reconstruction
             voxel_size (float): size of the voxels in the reconstructed volume
             rec_shape (int/tuple): shape of the reconstructed volume tuple with 3 dims [z,x,y] or int if isotropic
+            vol_center (int/tuple): center of the required reconstruction 
 
             --optional--
-            gpu_id (int): GPU for astra to use if not set globaly, defaults to -1
+            gpu_id (int): GPU for astra to use if not set globaly
             
         Returns:
         --------
             reconstruction (np.ndarray): [z,x,y] recontructed CT volume
     """
 
-    astra.astra.set_gpu_index(globals().get('GPU_ID', kwargs.get('gpu_id', -1)))
+    astra.astra.set_gpu_index(globals().get('GPU_ID', gpu_id))
 
     # from [proj_slc,rows,cols] to [rows,proj_slc,cols]
     projections = np.transpose(projections, (1,0,2))
@@ -206,7 +210,7 @@ def FDK_reconstruction(projections, scanner_params, proj_vecs, voxel_size=.1, re
 
 
 @timeit
-def AGD_reconstruction(projections, scanner_params, proj_vecs, voxel_size=.1, rec_shape=501, n_iter=50, **kwargs):
+def AGD_reconstruction(projections, scanner_params, proj_vecs, voxel_size=.1, rec_shape=501, n_iter=50, gpu_id=-1):
     """Uses AGD method to reconstruct CT volume from CB projections
         
         Args:
@@ -216,16 +220,17 @@ def AGD_reconstruction(projections, scanner_params, proj_vecs, voxel_size=.1, re
             proj_vecs (np.ndarray): vects describing the scanning used for reconstruction
             voxel_size (float): size of the voxels in the reconstructed volume
             rec_shape (int/tuple): shape of the reconstructed volume tuple with 3 dims [z,x,y] or int if isotropic
+            n_iter (int): rounds of iterative algorithm
 
             --optional--
-            gpu_id (int): GPU for astra to use if not set globaly, defaults to -1
+            gpu_id (int): GPU for astra to use if not set globaly
             
         Returns:
         --------
             reconstruction (np.ndarray): [z,x,y] recontructed CT volume
     """
 
-    astra.astra.set_gpu_index(globals().get('GPU_ID', kwargs.get('gpu_id', -1)))
+    astra.astra.set_gpu_index(globals().get('GPU_ID', gpu_id))
 
     # from [proj_slc,rows,cols] to [rows,proj_slc,cols]
     projections = np.transpose(projections, (1,0,2))
@@ -250,7 +255,6 @@ def AGD_reconstruction(projections, scanner_params, proj_vecs, voxel_size=.1, re
     alg_id = astra.algorithm.create(cfg_agd)
 
     astra.algorithm.run(alg_id, n_iter)
-
     reconstruction = astra.data3d.get(reconstruction_id)
 
     # release memory allocated by ASTRA structures
@@ -262,7 +266,8 @@ def AGD_reconstruction(projections, scanner_params, proj_vecs, voxel_size=.1, re
 
 @timeit
 def radial_slice_sampling(ct_volume, theta_range):
-    """Samples horizontal slices in a CT volume at angles in theta_range
+    """Samples radial slices in a CT volume at angles in theta_range
+
         Args:
         -----
             ct_volume (np.ndarray): image volume to be sliced, axis as [z,x,y] (XY plane must be of isotropic dims)
@@ -296,7 +301,7 @@ def radial_slice_sampling(ct_volume, theta_range):
 
 @timeit
 def create_ct_foam_phantom(shape=501, seed=0, gen_new=False):
-    """"""
+    
     if gen_new:
         foam_ct_phantom.FoamPhantom.generate('large_foam_phantom.h5', seed, nspheres_per_unit=10000)
     
@@ -315,7 +320,7 @@ def create_ct_foam_phantom(shape=501, seed=0, gen_new=False):
 
 @timeit
 def radial2axial(rad_slices):
-    """From https://github.com/Jomigi/Cone_angle_artifact_reduction code.radial2axial.py"""
+    """Reconstructs 3D volume from radial slices, from https://github.com/Jomigi/Cone_angle_artifact_reduction code.radial2axial.py"""
 
     n_rad = rad_slices.shape[0]
     n_x = rad_slices.shape[1]
